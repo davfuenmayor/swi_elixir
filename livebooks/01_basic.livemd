@@ -1,0 +1,101 @@
+# Prolog from Elixir
+
+Source: [SWI-Prolog](https://github.com/SWI-Prolog/swipl-devel).
+
+Queries are ordinary Prolog text. SWI keeps its choice points while Elixir
+pulls answers. Port and NIF use the same API and term representation.
+Before starting Livebook, set `SWI_ELIXIR_PATH` to the absolute project path,
+install SWI and build the NIF as described in the README.
+
+```elixir
+project = System.fetch_env!("SWI_ELIXIR_PATH")
+Mix.install([{:swi_elixir, path: project}])
+family = """
+:- module(family, [ancestor/2]).
+parent(ada, grace).
+parent(grace, alan).
+parent(alan, emmy).
+ancestor(X, Y) :- parent(X, Y).
+ancestor(X, Y) :- parent(X, Z), ancestor(Z, Y).
+"""
+load_prolog = fn session, source ->
+  path = Path.join(System.tmp_dir!(), "swi-elixir-family.pl")
+  File.write!(path, source)
+  try do
+    SWI.load(session, path)
+  after
+    File.rm(path)
+  end
+end
+```
+
+## Own and release a session
+
+Each demonstration uses a persistent session for its queries, with `after`
+cleanup on success or error. Reevaluating a cell releases its previous work.
+The tiny family program and demonstrations were written for this project.
+
+```elixir
+with_session = fn backend, fun ->
+  {:ok, session} = SWI.start_link(backend: backend)
+  try do
+    fun.(session)
+  after
+    SWI.stop(session)
+  end
+end
+```
+
+## Unification and variable identity
+
+Atoms carry a tag and binary name, avoiding new BEAM atoms from arbitrary
+Prolog output. Repeated variables share an ID within an answer; IDs have no
+meaning across answers.
+
+```elixir
+for backend <- [:port, :nif] do
+  with_session.(backend, fn session ->
+    [answer] = SWI.query(session, "X=f(a, [1,2]), Y=Z") |> Enum.to_list()
+    {:compound, "f", [{:atom, "a"}, [1, 2]]} = answer["X"]
+    {:var, id} = answer["Y"]
+    {:var, ^id} = answer["Z"]
+    {backend, answer}
+  end)
+end
+```
+
+## Recursion and multiple solutions
+
+The example program defines `ancestor/2` recursively. Prolog modules keep
+predicate names tidy. The assertion checks expected answers independently of
+backend agreement.
+
+```elixir
+answers = for backend <- [:port, :nif], into: %{} do
+  rows = with_session.(backend, fn session ->
+    :ok = load_prolog.(session, family)
+    SWI.query(session, "family:ancestor(ada, X)") |> Enum.map(& &1["X"])
+  end)
+  [{:atom, "grace"}, {:atom, "alan"}, {:atom, "emmy"}] = rows
+  {backend, rows}
+end
+true = answers.port == answers.nif
+answers
+```
+
+## Early stopping and failure
+
+`Enum.take/2` closes remaining choice points. The next query can immediately
+reuse the session. `call/3` returns a Boolean result or an error tuple.
+
+```elixir
+for backend <- [:port, :nif] do
+  with_session.(backend, fn session ->
+    [%{"X" => {:atom, "a"}}, %{"X" => {:atom, "b"}}] =
+      Enum.take(SWI.query(session, "member(X,[a,b,c])"), 2)
+    {:ok, false} = SWI.call(session, "fail")
+    {:ok, true} = SWI.call(session, "true")
+    {backend, :early_stop_and_reuse_checked}
+  end)
+end
+```

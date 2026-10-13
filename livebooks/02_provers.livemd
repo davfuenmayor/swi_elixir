@@ -1,0 +1,183 @@
+# Real proof search: quantifiers, branching, and two logics
+
+Sources: [leanHaT](https://leancop.de/leanhat/) and
+[nanoCoP-i-HT](https://www.leancop.de/ihat/).
+
+Set `SWI_ELIXIR_PATH` to this checkout's absolute path before starting Livebook.
+
+```elixir
+project = System.fetch_env!("SWI_ELIXIR_PATH")
+Mix.install([{:swi_elixir, path: project}])
+Code.require_file(Path.join(project, "examples/showcase.exs"))
+prover_sources = [
+  {"leanhat.pl", """
+  :- module(leanhat, [prove_text/1]).
+  :- op(700, xfx, =).
+  :- include('#{Path.join(project, "vendor/leanHaT/leanhat_swi.pl")}').
+  :- include('#{Path.join(project, "vendor/leanHaT/nanocop_tptp2.pl")}').
+  prove_text(Text) :-
+      swi_bridge:read_goal(Text, leanhat, Formula, _),
+      leancop_equal(Formula, Problem), prove(Problem).
+  """},
+  {"nanocop.pl", """
+  :- module(nanocop, [prove_text/2, prove_text/3]).
+  :- op(700, xfx, =).
+  :- current_prolog_flag(occurs_check, Flag), nb_setval(nanocop_load_flag, Flag).
+  :- include('#{Path.join(project, "vendor/nanoCoP-i-HT/nanocopi20_swi.pl")}').
+  :- nb_getval(nanocop_load_flag, Flag), set_prolog_flag(occurs_check, Flag),
+     nb_delete(nanocop_load_flag).
+  :- include('#{Path.join(project, "vendor/nanoCoP-i-HT/nanocop_tptp2.pl")}').
+  :- thread_local lit/4, pathlim/0.
+  prove_text(Text, Logic) :- prove_text(Text, Logic, _).
+  prove_text(Text, Logic, Proof) :-
+      memberchk(Logic, [intu, ht]),
+      setup_call_cleanup(
+        (current_prolog_flag(occurs_check, Previous), set_prolog_flag(occurs_check, true)),
+        (swi_bridge:read_goal(Text, nanocop, Formula, _),
+         leancop_equal(Formula, Equal), leancop_intermed(Equal, Logic, Problem),
+         prove(Problem, Proof)),
+        set_prolog_flag(occurs_check, Previous)).
+  """},
+  {"prover_showcase.pl", """
+  :- module(prover_showcase, [run/7, source/3]).
+  :- use_module(library(prolog_wrap)).
+  :- use_module(leanhat).
+  :- use_module(nanocop).
+  core(leanhat, leanhat:prove(_,_,_,_), leanhat:prove/4).
+  core(nanocop, nanocop:prove(_,_,_,_,_,_,_,_,_,_), nanocop:prove/10).
+  source(Prover, File, Line) :-
+      core(Prover, Head, _), clause(Head, _, Ref),
+      clause_property(Ref, file(File)), clause_property(Ref, line_count(Line)), !.
+  run(Prover, Logic, Text, Result, Calls, Inferences, Proof) :-
+      core(Prover, Head, PI),
+      setup_call_cleanup(
+        (nb_setval(showcase_calls, 0),
+         wrap_predicate(Head, showcase, Wrapped,
+           (prover_showcase:count, call(Wrapped)))),
+        (statistics(inferences, Before),
+         (once(search(Prover, Logic, Text, Proof)) -> Result = proved
+         ; Result = exhausted, Proof = none),
+         statistics(inferences, After), Inferences is After-Before,
+         nb_getval(showcase_calls, Calls)),
+        (unwrap_predicate(PI, showcase), nb_delete(showcase_calls))).
+  count :-
+      (nb_current(showcase_calls, N) -> N1 is N+1, nb_setval(showcase_calls, N1) ; true).
+  search(leanhat, ht, Text, unavailable) :- leanhat:prove_text(Text).
+  search(nanocop, Logic, Text, Proof) :- nanocop:prove_text(Text, Logic, Proof).
+  """}
+]
+load_prolog = fn session ->
+  dir = Path.join(System.tmp_dir!(), "prover-showcase-#{:erlang.phash2(prover_sources)}")
+  File.mkdir_p!(dir)
+  try do
+    Enum.each(prover_sources, fn {name, source} ->
+      path = Path.join(dir, name)
+      File.write!(path, source)
+      :ok = SWI.load(session, path)
+    end)
+  after
+    File.rm_rf!(dir)
+  end
+end
+```
+
+## Inspect the actual loaded kernels
+
+`source/3` asks SWI for the file and line of a real recursive proof-search
+clause: leanHaT `prove/4`, nanoCoP `prove/10`. It does not report the adapter's
+filename. Each cell owns and releases its sessions, including on assertion
+failure, so reevaluation does not accumulate engines.
+
+```elixir
+{:ok, session} = SWI.start_link(backend: :port)
+try do
+  :ok = load_prolog.(session)
+  for {prover, file} <- [{:leanhat, "leanhat_swi.pl"}, {:nanocop, "nanocopi20_swi.pl"}] do
+    [row] = SWI.query(session, "prover_showcase:source(#{prover},File,Line)") |> Enum.to_list()
+    {:atom, source} = row["File"]
+    true = Path.basename(source) == file
+    {prover, Path.basename(source), row["Line"]}
+  end
+after
+  SWI.stop(session)
+end
+```
+
+## Run and check the workloads
+
+The 20-step chain needs repeated universal instantiation to reach `p(f²⁰(a))`.
+The pigeonhole formula has four disjunctive placement assumptions and eighteen
+possible collisions. Both have constructive proofs. The four-step chain runs
+in all modes; the longer chain runs in intuitionistic nanoCoP mode. The larger
+cases can be expensive for HT search, so we do not require every prover to
+finish every case.
+
+Prelinearity `(p→q)∨(q→p)` and the quantified witness
+`∃y∀x(p(y)→p(x))` are HT theorems, but intuitionistically invalid.
+Excluded middle and double-negation elimination are negative controls in both
+logics. Every result is checked against the case's expected outcome, rather
+than merely checking that the backends agree.
+
+The project diagnostic installs a temporary SWI predicate wrapper around the
+recursive kernel. **Calls** counts real kernel entries, including failed
+branches; **Inferences** covers parsing, preprocessing, instrumentation and
+search. These are execution evidence, not an independent proof checker or an
+uninstrumented performance measurement. Runs are serial because predicate
+wrappers are shared within an embedded SWI runtime; do not run this diagnostic
+concurrently with other prover sessions. Cleanup removes each wrapper.
+
+```elixir
+cases = ProverShowcase.cases()
+results = for backend <- [:port, :nif] do
+  {:ok, session} = SWI.start_link(backend: backend)
+  try do
+    :ok = load_prolog.(session)
+    for example <- cases, {prover, logic} <- example.modes do
+      row = ProverShowcase.run(session, prover, logic, example.formula)
+      expected = Map.fetch!(example.expected, logic)
+      {:atom, ^expected} = row["Result"]
+      if prover == :nanocop and expected == "proved" do
+        [_ | _] = row["Proof"]
+      end
+      {backend, example.name, example.source, prover, logic, row["Result"], row["Calls"], row["Inferences"]}
+    end
+  after
+    SWI.stop(session)
+  end
+end
+[port, nif] = Enum.map(results, fn rows ->
+  Enum.map(rows, fn {_, name, source, prover, logic, result, _, _} ->
+    {name, source, prover, logic, result}
+  end)
+end)
+true = port == nif
+List.flatten(results)
+```
+
+`proved` means the invoked prover found a proof. `exhausted` means that
+invocation failed after its search; these particular negative cases are known
+invalid independently. nanoCoP's HT embedding is sound but incomplete, so
+failure is not a general invalidity test. A timeout raises `SWI.Error` and is
+**unknown**, never a negative verdict. No timeout is accepted as a passing
+result in the table above.
+
+## Retrieve a genuine nanoCoP proof
+
+This is nanoCoP's connection proof term, transported by the usual term
+encoding. In HT mode nanoCoP proves the intuitionistic translation, so its proof
+would concern the transformed problem. Here we display an intuitionistic
+function-chain proof directly. We do not reconstruct or independently verify
+it. leanHaT returns success only: its `prove/2` argument is a search bound,
+not a proof certificate.
+
+```elixir
+{:ok, session} = SWI.start_link(backend: :nif)
+try do
+  :ok = load_prolog.(session)
+  row = ProverShowcase.run(session, :nanocop, :intu, ProverShowcase.chain(4))
+  [_ | _] = row["Proof"]
+  row["Proof"]
+after
+  SWI.stop(session)
+end
+```

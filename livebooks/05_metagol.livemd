@@ -1,0 +1,321 @@
+# Metagol: learn programs that invent, recurse, and compose
+
+Source: [Metagol repository](https://github.com/metagol/metagol).
+
+A few examples go in. A readable Prolog program comes out. In this lab you will
+learn **a relation that needs an invented concept**, **an unbounded recursive
+relation**, and **a transformation over nested lists**. Every program below is
+learned by the actual Metagol engine when you evaluate the cell.
+
+## 1. The learning contract
+
+Inductive Logic Programming learns a hypothesis **H**, using background
+knowledge **B**, positive examples **E+**, negative examples **E−**, and a
+**language bias** that limits which programs may be proposed.
+
+```mermaid
+flowchart LR
+  B["Background: available predicates"] --> M["Metagol: search over metarules"]
+  E["Examples: positive and negative"] --> M
+  R["Bias: clause templates and budget"] --> M
+  M --> H["Learned Prolog clauses"]
+  H --> T["Execute on unseen queries"]
+```
+
+The training objective is to explain positives and reject negatives. Many
+programs can fit a small dataset; what the learner can express and what we test
+matter as much as training accuracy. A finite passing test suite is evidence,
+not a proof that the learned concept is universally correct.
+
+Set `SWI_ELIXIR_PATH` to this checkout's absolute path. Install SWI and compile
+the NIF as described in the README. No downloads are needed for the learner:
+the Prolog source is in `vendor/metagol/`.
+
+```elixir
+project = System.fetch_env!("SWI_ELIXIR_PATH")
+Mix.install([{:swi_elixir, path: project}])
+Code.require_file(Path.join(project, "examples/ilp.exs"))
+backend = :port
+```
+
+```elixir
+inline_tasks = %{
+  "metagol_tasks.pl" => ~S"""
+:- module(metagol_tasks, [primitives/2, training/3, tests/2]).
+
+mg_mother(ann,amy). mg_mother(ann,andy). mg_mother(amy,amelia).
+mg_mother(linda,gavin). mg_mother(nora,ivy).
+mg_father(steve,amy). mg_father(steve,andy). mg_father(gavin,amelia).
+mg_father(andy,spongebob). mg_father(ivy,leo).
+
+mg_parent(queen_victoria,edward_seventh).
+mg_parent(edward_seventh,george_fifth).
+mg_parent(george_fifth,george_sixth).
+mg_parent(george_sixth,elizabeth_second).
+mg_parent(queen_mother,elizabeth_second).
+mg_parent(elizabeth_second,prince_charles).
+mg_parent(prince_philip,prince_charles).
+mg_parent(prince_charles,prince_william).
+mg_parent(prince_charles,prince_harry).
+mg_parent(princess_diana,prince_william).
+mg_parent(princess_diana,prince_harry).
+mg_parent(prince_william,prince_george).
+
+primitives(grandparent, [mg_mother/2,mg_father/2]).
+primitives(ancestor, [mg_parent/2]).
+primitives(droplasts, [mg_tail/2,mg_reverse/2]).
+
+training(grandparent,
+ [grandparent(ann,amelia),grandparent(steve,amelia),grandparent(ann,spongebob),
+  grandparent(steve,spongebob),grandparent(linda,amelia)],
+ [grandparent(amy,amelia)]).
+training(ancestor,
+ [ancestor(elizabeth_second,prince_charles),ancestor(george_sixth,prince_harry),
+  ancestor(queen_mother,prince_william)], []).
+training(droplasts,
+ [droplasts([[a,b,c],[d,e,f,g]],[[a,b],[d,e,f]]),
+  droplasts([[h,i],[j,k,l],[m,n,o,p]],[[h],[j,k],[m,n,o]])],
+ [droplasts([[a,b,c]],[[b,c]])]).
+
+tests(grandparent,
+ [grandparent(nora,leo)-true, grandparent(ann,gavin)-false,
+  grandparent(ann,ann)-false]).
+tests(ancestor,
+ [ancestor(queen_victoria,prince_george)-true,
+  ancestor(princess_diana,prince_george)-true,
+  ancestor(prince_george,queen_victoria)-false, ancestor(queen_victoria,queen_victoria)-false]).
+tests(droplasts,
+ [droplasts([[q],[r,s,t,u,v],[]],[[],[r,s,t,u],[]])-false,
+  droplasts([[q],[r,s,t,u,v]],[[],[r,s,t,u]])-true,
+  droplasts([],[])-true, droplasts([[x,y]],[[y]])-false]).
+"""
+}
+```
+
+
+Change `backend` to `:nif` and reevaluate to use the same tasks and API with
+embedded SWI. The helper opens one session, runs one bounded learning experiment,
+and stops in an `after` block. Upstream Metagol uses shared mutable registries;
+these demonstrations serialize their learning calls and restore the settings
+and primitive declarations they change. Run them serially alongside other
+Metagol code in the same native VM. Port gives each session its own registry.
+
+## 2. Invent the missing concept: grandparent
+
+The task supplies `mother/2` and `father/2`, but **does not supply `parent/2`**.
+Our primitives are named `mg_mother/2` and `mg_father/2` to avoid collisions.
+
+Five positive examples include grandparent paths through either type of parent;
+`grandparent(amy,amelia)` is negative: being a mother is not enough. Two extra
+background facts, `mg_mother(nora,ivy)` and `mg_father(ivy,leo)`, support a
+project-authored test whose label is withheld from training.
+
+```prolog
+mg_mother(ann,amy). mg_mother(ann,andy). mg_mother(amy,amelia).
+mg_mother(linda,gavin). mg_mother(nora,ivy).
+mg_father(steve,amy). mg_father(steve,andy). mg_father(gavin,amelia).
+mg_father(andy,spongebob). mg_father(ivy,leo).
+
+training(grandparent,
+ [grandparent(ann,amelia), grandparent(steve,amelia),
+  grandparent(ann,spongebob), grandparent(steve,spongebob),
+  grandparent(linda,amelia)],
+ [grandparent(amy,amelia)]).
+```
+
+```mermaid
+flowchart LR
+  Nora["nora"] -->|mother| Ivy["ivy"]
+  Ivy -->|father| Leo["leo"]
+  Nora -. "grandparent? label withheld" .-> Leo
+```
+
+Metarules are clause templates, not answers. Our shared bias contains these
+four forms; `P`, `Q`, `R`, and `F` stand for predicate symbols:
+
+| Template | Allowed clause | Idea |
+| --- | --- | --- |
+| Identity | `P(A,B) :- Q(A,B).` | Reuse a primitive |
+| Chain | `P(A,B) :- Q(A,C), R(C,B).` | Compose two relations |
+| Tail recursion | `P(A,B) :- Q(A,C), P(C,B).` | Follow arbitrarily long paths |
+| Higher-order | `P(A,B) :- Q(A,B,F).` | Learn the predicate passed to a combinator |
+
+These templates are declared in Prolog as:
+
+```prolog
+metarule(identity, [P,Q], [P,A,B], [[Q,A,B]]).
+metarule(chain, [P,Q,R], [P,A,B], [[Q,A,C],[R,C,B]]).
+metarule(tailrec, [P,Q], [P,A,B], [[Q,A,C],[P,C,B]]).
+metarule(tohigherorder, [P,Q,F], [P,A,B], [[Q,A,B,F]]).
+```
+
+Before running, consider why one generic grandparent clause cannot directly
+name both `mother` and `father` in every possible combination. A reusable
+invented helper can combine them.
+
+```elixir
+grandparent = ILPShowcase.learn(:metagol, :grandparent, 3, backend, inline_tasks) |> ILPShowcase.check!()
+{:atom, "learned"} = grandparent["Status"]
+3 = grandparent["Clauses"]
+IO.puts(grandparent["Program"])
+ILPShowcase.scores(grandparent)
+```
+
+Read the emitted clauses. The invented predicate usually has a name such as
+`grandparent_1`; its role is **parent**, even though we never gave that concept a
+name or a definition. The displayed program is the learner's returned
+hypothesis, converted by Metagol's own clause converter and executed as Prolog.
+It is not an expected program pasted into the notebook.
+
+```elixir
+grandparent["Rows"]
+```
+
+The test cases include the unseen `grandparent(nora,leo)`, an unrelated pair,
+and a self-pair. Training rows and test rows are labelled separately.
+
+### Experiment: make the program budget too small
+
+Metagol deepens its search by clause count. A smaller budget is a stronger
+language restriction, not a request to train for fewer iterations.
+
+```elixir
+budget_results = for budget <- [2, 3] do
+  result = ILPShowcase.learn(:metagol, :grandparent, budget, backend, inline_tasks)
+  expected = if budget == 2, do: "no_hypothesis", else: "learned"
+  {:atom, ^expected} = result["Status"]
+  %{budget: budget, status: expected, clauses: result["Clauses"], search_trace: result["Trace"]}
+end
+budget_results
+```
+
+`no_hypothesis` here means the bounded search found no consistent program in
+this configured space. A timeout is different: the wrapper raises `SWI.Error`
+and the result is unknown. The two-clause failure is not a claim about every
+possible definition of grandparent in every logic language.
+
+## 3. Learn recursion: one rule, any number of generations
+
+The task uses a small acyclic family graph and three positive ancestor queries.
+It supplies `parent/2`, but no ancestor implementation. The primitive is named
+`mg_parent/2` to avoid collisions.
+
+```prolog
+mg_parent(queen_victoria,edward_seventh).
+mg_parent(edward_seventh,george_fifth).
+mg_parent(george_fifth,george_sixth).
+mg_parent(george_sixth,elizabeth_second).
+mg_parent(queen_mother,elizabeth_second).
+mg_parent(elizabeth_second,prince_charles).
+mg_parent(prince_philip,prince_charles).
+mg_parent(prince_charles,prince_william).
+mg_parent(prince_charles,prince_harry).
+mg_parent(princess_diana,prince_william).
+mg_parent(princess_diana,prince_harry).
+mg_parent(prince_william,prince_george).
+
+training(ancestor,
+ [ancestor(elizabeth_second,prince_charles),
+  ancestor(george_sixth,prince_harry),
+  ancestor(queen_mother,prince_william)], []).
+```
+
+A two-clause program must handle both a direct edge and a longer path. Our
+project-authored tests include Queen Victoria to Prince George, a path longer
+than any training example, plus reverse and self queries. These names are
+historical identifiers in the example data; this is a toy graph, not a
+complete genealogy.
+
+```elixir
+ancestor = ILPShowcase.learn(:metagol, :ancestor, 2, backend, inline_tasks) |> ILPShowcase.check!()
+2 = ancestor["Clauses"]
+IO.puts(ancestor["Program"])
+Enum.filter(ancestor["Rows"], &(&1.split == "test"))
+```
+
+Locate the base clause and the recursive clause. Each recursive step consumes
+one edge of this acyclic graph. We test **strict ancestry**: a person is not
+their own ancestor. Cycles would require different operational care; do not
+assume naive recursive Prolog terminates on arbitrary cyclic graphs.
+
+## 4. Learn a program inside a program: nested droplasts
+
+This task combines predicate invention with **interpreted background
+knowledge**: Metagol can inspect the definition of `map`, rather than treating
+it as an opaque primitive.
+
+We use the same task with a reduced, explicit bias: `mg_tail/2`,
+`mg_reverse/2`, the four templates above, and interpreted `map`. Our two
+positive training examples are fixed instead of randomly generated; we also
+add one negative example. **No droplast implementation is available to the
+learner.**
+
+```prolog
+training(droplasts,
+ [droplasts([[a,b,c],[d,e,f,g]],[[a,b],[d,e,f]]),
+  droplasts([[h,i],[j,k,l],[m,n,o,p]],[[h],[j,k],[m,n,o]])],
+ [droplasts([[a,b,c]],[[b,c]])]).
+```
+
+| Input | Required output |
+| --- | --- |
+| `[[a,b,c],[d,e,f,g]]` | `[[a,b],[d,e,f]]` |
+| `[[h,i],[j,k,l],[m,n,o,p]]` | `[[h],[j,k],[m,n,o]]` |
+
+```elixir
+droplasts = ILPShowcase.learn(:metagol, :droplasts, 3, backend, inline_tasks) |> ILPShowcase.check!()
+3 = droplasts["Clauses"]
+IO.puts(droplasts["Program"])
+Enum.filter(droplasts["Rows"], &(&1.split == "test"))
+```
+
+Trace the invented transformation on `[r,s,t,u,v]`: reverse the list, remove
+its head, then reverse again. `map` applies that invented transformation to
+each sublist. This composition removes the **last** element, not the first.
+
+The tests deliberately include a singleton sublist, a longer unseen sublist,
+an empty outer list, and a tempting wrong output. An empty **inner** list is
+outside the drop-last domain: the learned transformation fails because
+`mg_tail([],_)` fails. That behavior is checked, not silently replaced with a
+handwritten special case.
+
+## 5. Check the runtime and the backend contract
+
+Each learning query records SWI inference counts and elapsed time. Counts
+include orchestration and evaluation, and are not a benchmark of the learner
+alone.
+
+```elixir
+%{
+  inferences: droplasts["Inferences"],
+  elapsed_us: droplasts["ElapsedUs"]
+}
+```
+
+```elixir
+for {task, budget} <- [grandparent: 3, ancestor: 2, droplasts: 3] do
+  port = ILPShowcase.learn(:metagol, task, budget, :port, inline_tasks) |> ILPShowcase.check!()
+  nif = ILPShowcase.learn(:metagol, task, budget, :nif, inline_tasks) |> ILPShowcase.check!()
+  true = port["Rows"] == nif["Rows"]
+  true = port["Clauses"] == nif["Clauses"]
+  %{task: task, clauses: port["Clauses"], scores: ILPShowcase.scores(port)}
+end
+```
+
+## 6. Take the learner apart
+
+Try these experiments by changing the corresponding Prolog task or metarule
+above, then reevaluate the relevant cell. The default notebook is checked automatically; experiments may
+legitimately change the expected results.
+
+1. Remove the tail-recursive template. Can the two-clause ancestor task still
+   explain its longest training example?
+2. Add `mg_droplast/2` as a primitive. How many clauses are now needed, and how
+   much of the original learning problem have you supplied as background?
+3. Remove the negative droplasts example. Which unseen cases still distinguish
+   a correct transformation from one that merely fits the positives?
+4. Replace the outer-map task with “drop the last row too.” Predict the extra
+   composition before trying it.
+
+The next notebook shows a different inductive bias: Aleph searches clauses
+within a bottom clause, using mode declarations instead of metarules.

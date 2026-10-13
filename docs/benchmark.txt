@@ -1,0 +1,32 @@
+versions: %{
+  otp: ~c"29",
+  elixir: "1.20.4",
+  swi: "SWI-Prolog version 10.0.1 for x86_64-linux"
+}
+{:port, "tiny success", %{median_us: 446, p95_us: 727}}
+{:port, "symbolic unification", %{median_us: 620, p95_us: 948}}
+{:port, "100 answers", %{median_us: 13866, p95_us: 17492}}
+{:port, "leanHaT quantified", %{median_us: 1015, p95_us: 1466}}
+{:port, "nanoCoP HT quantified", %{median_us: 3273, p95_us: 3604}}
+%{
+  timeout: %{median_us: 20701, p95_us: 21565},
+  backend: :port,
+  first_start_query_stop_us: 57364,
+  repeated_start_query_stop: %{median_us: 40561, p95_us: 49709},
+  beam_rss_kb: 90468,
+  swipl_rss_kb: 13364
+}
+isolated exit: {:error, {:port_exit, 7}}
+{:nif, "tiny success", %{median_us: 269, p95_us: 329}}
+{:nif, "symbolic unification", %{median_us: 418, p95_us: 618}}
+{:nif, "100 answers", %{median_us: 9572, p95_us: 10977}}
+{:nif, "leanHaT quantified", %{median_us: 823, p95_us: 982}}
+{:nif, "nanoCoP HT quantified", %{median_us: 2960, p95_us: 3185}}
+%{
+  timeout: %{median_us: 20481, p95_us: 20506},
+  backend: :nif,
+  first_start_query_stop_us: 45740,
+  repeated_start_query_stop: %{median_us: 545, p95_us: 598},
+  beam_rss_kb: 98696,
+  swipl_rss_kb: nil
+}

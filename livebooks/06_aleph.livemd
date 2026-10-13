@@ -1,0 +1,582 @@
+# Aleph: discover a relational rule, then watch it overfit
+
+Source: [Aleph repository](https://github.com/friguzzi/aleph).
+
+A train is a collection of cars. Each car has properties. Can a learner explain
+which trains are eastbound—and does the explanation survive a train it has
+never seen?
+
+In this lab you will inspect **a bottom clause**, learn a compact relational
+classifier, deliberately force memorization, and then learn a recursive list
+program. Both successful and misleading hypotheses come from the real Aleph
+engine; we execute them on labelled diagnostic cases.
+
+## 1. Learn a theory, not a lookup table
+
+Aleph's basic cycle chooses an uncovered positive example, saturates it with
+background facts to construct a bottom clause, searches for a useful
+consistent generalization, and adds the selected clause to the theory.
+It repeats until the positives have been covered.
+
+```mermaid
+flowchart LR
+  E["Choose uncovered positive"] --> B["Saturate: build bottom clause"]
+  B --> S["Search: score generalizations"]
+  S --> H["Add selected clause"]
+  H --> R{"Positives left?"}
+  R -->|yes| E
+  R -->|no| T["Return learned theory"]
+```
+
+A bottom clause is a detailed explanation of one example under the configured
+language. It contains far more literals than a good final rule usually needs.
+Aleph's search does not guarantee the globally best theory: its standard
+induction procedure selects clauses and removes covered positives greedily.
+
+Set `SWI_ELIXIR_PATH` to the absolute checkout path and build SWI/NIF as in the
+README. The learner source is already in `vendor/aleph/`.
+
+```elixir
+project = System.fetch_env!("SWI_ELIXIR_PATH")
+Mix.install([{:swi_elixir, path: project}])
+Code.require_file(Path.join(project, "examples/ilp.exs"))
+backend = :port
+```
+
+```elixir
+inline_tasks = %{
+  "aleph_trains.pl" => ~S"""
+:- module(aleph_trains, []).
+
+:- if(current_predicate(use_rendering/1)).
+:- use_rendering(prolog).
+:- endif.
+:- aleph.
+:-style_check(-discontiguous).
+:- aleph_set(i,2).
+
+:- modeh(1,eastbound(+train)).
+:- modeb(1,short(+car)).
+:- modeb(1,closed(+car)).
+:- modeb(1,long(+car)).
+:- modeb(1,open_car(+car)).
+:- modeb(1,double(+car)).
+:- modeb(1,jagged(+car)).
+:- modeb(1,shape(+car,#shape)).
+:- modeb(1,load(+car,#shape,#int)).
+:- modeb(1,wheels(+car,#int)).
+:- modeb(*,has_car(+train,-car)).
+
+:- determination(eastbound/1,short/1).
+:- determination(eastbound/1,closed/1).
+:- determination(eastbound/1,long/1).
+:- determination(eastbound/1,open_car/1).
+:- determination(eastbound/1,double/1).
+:- determination(eastbound/1,jagged/1).
+:- determination(eastbound/1,shape/2).
+:- determination(eastbound/1,wheels/2).
+:- determination(eastbound/1,has_car/2).
+:- determination(eastbound/1,load/3).
+:-begin_bg.
+car(car_11).  car(car_12).  car(car_13).  car(car_14).
+car(car_21).  car(car_22).  car(car_23).
+car(car_31).  car(car_32).  car(car_33).
+car(car_41).  car(car_42).  car(car_43).  car(car_44).
+car(car_51).  car(car_52).  car(car_53).
+car(car_61).  car(car_62).
+car(car_71).  car(car_72).  car(car_73).
+car(car_81).  car(car_82).
+car(car_91).  car(car_92).  car(car_93).  car(car_94).
+car(car_101).  car(car_102).
+
+shape(elipse).  shape(hexagon).  shape(rectangle).  shape(u_shaped).
+shape(triangle). shape(circle). shape(nil).
+
+train(east1).  train(east2).  train(east3).  train(east4).  train(east5).
+train(west6).  train(west7).  train(west8).  train(west9).  train(west10).
+
+
+short(car_12).		
+closed(car_12).		
+long(car_11).		
+long(car_13).
+short(car_14).
+open_car(car_11).		
+open_car(car_13).
+open_car(car_14).
+shape(car_11,rectangle). 
+shape(car_12,rectangle).
+shape(car_13,rectangle).
+shape(car_14,rectangle).
+load(car_11,rectangle,3). 
+load(car_12,triangle,1).
+load(car_13,hexagon,1).
+load(car_14,circle,1).
+wheels(car_11,2).	  
+wheels(car_12,2).
+wheels(car_13,3).
+wheels(car_14,2).
+has_car(east1,car_11). 
+has_car(east1,car_12).
+has_car(east1,car_13).
+has_car(east1,car_14).
+
+has_car(east2,car_21).
+has_car(east2,car_22).
+has_car(east2,car_23).
+short(car_21).
+short(car_22).
+short(car_23).
+shape(car_21,u_shaped).
+shape(car_22,u_shaped).
+shape(car_23,rectangle).
+open_car(car_21).
+open_car(car_22).
+closed(car_23).
+load(car_21,triangle,1).
+load(car_22,rectangle,1).
+load(car_23,circle,2).
+wheels(car_21,2).
+wheels(car_22,2).
+wheels(car_23,2).
+
+has_car(east3,car_31).
+has_car(east3,car_32).
+has_car(east3,car_33).
+short(car_31).
+short(car_32).
+long(car_33).
+shape(car_31,rectangle).
+shape(car_32,hexagon).
+shape(car_33,rectangle).
+open_car(car_31).
+closed(car_32).
+closed(car_33).
+load(car_31,circle,1).
+load(car_32,triangle,1).
+load(car_33,triangle,1).
+wheels(car_31,2).
+wheels(car_32,2).
+wheels(car_33,3).
+
+has_car(east4,car_41).
+has_car(east4,car_42).
+has_car(east4,car_43).
+has_car(east4,car_44).
+short(car_41).
+short(car_42).
+short(car_43).
+short(car_44).
+shape(car_41,u_shaped).
+shape(car_42,rectangle).
+shape(car_43,elipse).
+shape(car_44,rectangle).
+double(car_42).
+open_car(car_41).
+open_car(car_42).
+closed(car_43).
+open_car(car_44).
+load(car_41,triangle,1).
+load(car_42,triangle,1).
+load(car_43,rectangle,1).
+load(car_44,rectangle,1).
+wheels(car_41,2).
+wheels(car_42,2).
+wheels(car_43,2).
+wheels(car_44,2).
+
+has_car(east5,car_51).
+has_car(east5,car_52).
+has_car(east5,car_53).
+short(car_51).
+short(car_52).
+short(car_53).
+shape(car_51,rectangle).
+shape(car_52,rectangle).
+shape(car_53,rectangle).
+double(car_51).
+open_car(car_51).
+closed(car_52).
+closed(car_53).
+load(car_51,triangle,1).
+load(car_52,rectangle,1).
+load(car_53,circle,1).
+wheels(car_51,2).
+wheels(car_52,3).
+wheels(car_53,2).
+
+has_car(west6,car_61).
+has_car(west6,car_62).
+long(car_61).
+short(car_62).
+shape(car_61,rectangle).
+shape(car_62,rectangle).
+closed(car_61).
+open_car(car_62).
+load(car_61,circle,3).
+load(car_62,triangle,1).
+wheels(car_61,2).
+wheels(car_62,2).
+
+has_car(west7,car_71).
+has_car(west7,car_72).
+has_car(west7,car_73).
+short(car_71).
+short(car_72).
+long(car_73).
+shape(car_71,rectangle).
+shape(car_72,u_shaped).
+shape(car_73,rectangle).
+double(car_71).
+open_car(car_71).
+open_car(car_72).
+jagged(car_73).
+load(car_71,circle,1).
+load(car_72,triangle,1).
+load(car_73,nil,0).
+wheels(car_71,2).
+wheels(car_72,2).
+wheels(car_73,2).
+
+has_car(west8,car_81).
+has_car(west8,car_82).
+long(car_81).
+short(car_82).
+shape(car_81,rectangle).
+shape(car_82,u_shaped).
+closed(car_81).
+open_car(car_82).
+load(car_81,rectangle,1).
+load(car_82,circle,1).
+wheels(car_81,3).
+wheels(car_82,2).
+
+has_car(west9,car_91).
+has_car(west9,car_92).
+has_car(west9,car_93).
+has_car(west9,car_94).
+short(car_91).
+long(car_92).
+short(car_93).
+short(car_94).
+shape(car_91,u_shaped).
+shape(car_92,rectangle).
+shape(car_93,rectangle).
+shape(car_94,u_shaped).
+open_car(car_91).
+jagged(car_92).
+open_car(car_93).
+open_car(car_94).
+load(car_91,circle,1).
+load(car_92,rectangle,1).
+load(car_93,rectangle,1).
+load(car_93,circle,1).
+wheels(car_91,2).
+wheels(car_92,2).
+wheels(car_93,2).
+wheels(car_94,2).
+
+has_car(west10,car_101).
+has_car(west10,car_102).
+short(car_101).
+long(car_102).
+shape(car_101,u_shaped).
+shape(car_102,rectangle).
+open_car(car_101).
+open_car(car_102).
+load(car_101,rectangle,1).
+load(car_102,rectangle,2).
+wheels(car_101,2).
+wheels(car_102,2).
+
+train(probe_yes). train(probe_long). train(probe_open). train(probe_split).
+car(probe_y). car(probe_l). car(probe_o). car(probe_s1). car(probe_s2).
+has_car(probe_yes,probe_y). short(probe_y). closed(probe_y).
+has_car(probe_long,probe_l). long(probe_l). closed(probe_l).
+has_car(probe_open,probe_o). short(probe_o). open_car(probe_o).
+has_car(probe_split,probe_s1). short(probe_s1). open_car(probe_s1).
+has_car(probe_split,probe_s2). long(probe_s2). closed(probe_s2).
+:-end_bg.
+:-begin_in_pos.
+eastbound(east1).
+eastbound(east2).
+eastbound(east3).
+eastbound(east4).
+eastbound(east5).
+:-end_in_pos.
+:-begin_in_neg.
+eastbound(west6).
+eastbound(west7).
+eastbound(west8).
+eastbound(west9).
+eastbound(west10).
+:-end_in_neg.
+""",
+  "aleph_membership.pl" => ~S"""
+:- module(aleph_membership, []).
+:- if(current_predicate(use_rendering/1)).
+:- use_rendering(prolog).
+:- endif.
+:- aleph.
+
+:- mode(*,mem(+any,+list)).
+:- mode(1,((+list) = ([-any|-list]))).
+
+:- aleph_set(i,3).
+:- aleph_set(noise,0).
+
+
+:- determination(mem/2,mem/2).
+:- determination(mem/2,'='/2).
+
+:-begin_bg.
+
+:-end_bg.
+:-begin_in_pos.
+mem(0,[0]).
+mem(1,[1]).
+mem(2,[2]).
+mem(3,[3]).
+mem(4,[4]).
+mem(0,[0,0]).
+mem(0,[0,1]).
+mem(0,[0,2]).
+mem(1,[0,1]).
+mem(0,[1,0]).
+mem(0,[2,0]).
+mem(1,[1,1]).
+mem(1,[2,1]).
+mem(1,[1,2]).
+mem(2,[2,2]).
+mem(2,[3,2]).
+mem(2,[2,3]).
+mem(3,[2,3]).
+mem(3,[4,2,3]).
+:-end_in_pos.
+:-begin_in_neg.
+mem(0,[1,2]).
+mem(0,[1]).
+mem(1,[0]).
+mem(3,[]).
+mem(2,[]).
+mem(2,[3]).
+:-end_in_neg.
+"""
+}
+```
+
+
+Change `backend` to `:nif` to repeat the same experiment with embedded SWI.
+The shared helper owns and releases its session in `after`. Our Aleph adapter
+serializes learning, rereads a task for every experiment, and removes learned
+target clauses afterward. This matters because Aleph consumes its uncovered
+example set and adds learned clauses to its background while learning.
+Do not run other Aleph operations on these demonstration modules concurrently
+in the same native VM; module state is shared across native sessions.
+
+## 2. Read the language bias
+
+The supplied training set has **five positive trains and five negative trains**.
+The background describes individual cars, their lengths, shapes, loads, wheels,
+and whether they are open or closed. These are relational facts, not a flat
+feature vector prepared in Elixir.
+
+The dataset's mode declarations control what Aleph can build:
+
+```prolog
+:- modeh(1, eastbound(+train)).
+:- modeb(*, has_car(+train,-car)).
+:- modeb(1, short(+car)).
+:- modeb(1, closed(+car)).
+```
+
+| Notation | Role in this example |
+| --- | --- |
+| `modeh` | Permitted head of a learned clause |
+| `modeb` | Permitted body literal |
+| `+train`, `+car` | Input variables of the indicated type |
+| `-car` | Output variable introduced by a literal |
+| `#shape`, `#int` | Constants selected from a type |
+| `1`, `*` | Recall bound, not the arity of the predicate |
+| `determination/2` | Which body predicates may explain this target |
+
+The relevant background and labels are ordinary Prolog facts. Other features
+such as shape, load, and wheel count act as distractors. The four probe labels
+are withheld from training.
+
+```prolog
+has_car(east1,car_12). short(car_12). closed(car_12).
+has_car(east2,car_23). short(car_23). closed(car_23).
+has_car(east3,car_32). short(car_32). closed(car_32).
+has_car(east4,car_43). short(car_43). closed(car_43).
+has_car(east5,car_52). short(car_52). closed(car_52).
+
+has_car(west6,car_61). long(car_61). closed(car_61).
+has_car(west7,car_71). short(car_71).
+has_car(west8,car_81). long(car_81). closed(car_81).
+has_car(west9,car_91). short(car_91).
+has_car(west10,car_101). short(car_101).
+
+:- begin_in_pos.
+eastbound(east1). eastbound(east2). eastbound(east3).
+eastbound(east4). eastbound(east5).
+:- end_in_pos.
+:- begin_in_neg.
+eastbound(west6). eastbound(west7). eastbound(west8).
+eastbound(west9). eastbound(west10).
+:- end_in_neg.
+```
+
+## 3. Watch saturation become a rule
+
+Before running, try to name a property that must hold of **one particular
+car**, rather than of the train's cars considered separately.
+
+```elixir
+trains = ILPShowcase.learn(:aleph, :trains, 4, backend, inline_tasks) |> ILPShowcase.check!()
+1 = trains["Clauses"]
+IO.puts("BOTTOM CLAUSE FOR THE FIRST POSITIVE\n" <> trains["Bottom"])
+IO.puts("REDUCED CLAUSE\n" <> trains["Reduced"])
+IO.puts("INDUCED THEORY\n" <> trains["Program"])
+ILPShowcase.scores(trains)
+```
+
+The adapter actually calls Aleph's public `sat(1)`, `bottom/1`, `reduce/1`, and
+`induce/1`. The first three expose the manual's saturation/reduction workflow;
+`induce/1` then performs full theory learning. The text above comes from those
+returned terms. Search trace output is captured in `trains["Trace"]` so it
+does not bury the results; print it when you want the full search history.
+
+Read the final clause carefully: the same variable appears in `has_car`,
+`short`, and `closed`. This shared witness is the point of relational learning.
+
+```mermaid
+flowchart LR
+  T["Train"] -->|has_car| C["One car C"]
+  C --> S["short(C)"]
+  C --> F["closed(C)"]
+```
+
+## 4. A trap that tests the meaning of a variable
+
+These holdout structures are project-authored diagnostics, not a random test
+split or an independent benchmark. Their expected labels follow the intended
+short-and-closed concept. Their background facts are visible to Prolog; their
+labels never enter Aleph's training examples.
+
+| Train | Cars | Expected |
+| --- | --- | --- |
+| `probe_yes` | one short, closed car | eastbound |
+| `probe_long` | one long, closed car | not eastbound |
+| `probe_open` | one short, open car | not eastbound |
+| `probe_split` | a short/open car and a long/closed car | not eastbound |
+
+`probe_split` catches the superficially similar rule “some car is short and
+some car is closed.” The correct concept requires both properties of the
+**same car**.
+
+```elixir
+test_rows = Enum.filter(trains["Rows"], &(&1.split == "test"))
+%{actual: false, expected: false} = Enum.find(test_rows, &(&1.goal == "eastbound(probe_split)"))
+test_rows
+```
+
+## 5. Perfect training scores can hide memorization
+
+Aleph's `clauselength` includes the head literal. A rule with `eastbound` in
+its head and `has_car`, `short`, `closed` in its body therefore needs a limit
+of **four**. Lower the limit to three and that rule becomes inexpressible.
+Aleph can still cover the five training positives with ground facts.
+
+```elixir
+memorized = ILPShowcase.learn(:aleph, :trains, 3, backend, inline_tasks)
+5 = memorized["Clauses"]
+[train_score, test_score] = ILPShowcase.scores(memorized)
+%{correct: 10, total: 10} = train_score
+%{false_negatives: 1, false_positives: 0} = test_score
+IO.puts(memorized["Program"])
+%{training: train_score, holdout: test_score,
+  mistakes: Enum.reject(memorized["Rows"], &(&1.expected == &1.actual))}
+```
+
+The unseen positive train is missed. The three negative diagnostics still
+pass because the memorized facts say nothing about any new train. Training
+accuracy alone cannot distinguish this lookup table from the general rule.
+
+```elixir
+for {limit, result} <- [{3, memorized}, {4, trains}] do
+  %{max_literals: limit, clauses: result["Clauses"], scores: ILPShowcase.scores(result)}
+end
+```
+
+Edit the limit in an extra copy of the learning cell and inspect the actual
+program. Do not treat a larger limit as automatically better: more expressive
+search spaces can be more expensive and can fit spurious patterns. These
+experiments use zero allowed training noise, a 5,000-node search bound and a
+15-second query budget. A timeout is an unknown outcome, not successful
+learning or evidence that the concept is impossible.
+
+## 6. From classification to a recursive program
+
+The recursive task learns `mem(Element,List)` from 19 positive and six negative
+examples. Its bias allows the target predicate itself in clause bodies, plus
+list decomposition through equality. Here are representative labels:
+
+```prolog
+:- mode(*, mem(+any,+list)).
+:- mode(1, ((+list) = ([-any|-list]))).
+:- determination(mem/2, mem/2).
+:- determination(mem/2, '='/2).
+mem(1,[0,1]).
+mem(3,[4,2,3]).
+mem(0,[1,2]). % negative example
+mem(3,[]).     % negative example
+```
+
+```elixir
+membership = ILPShowcase.learn(:aleph, :membership, 4, backend, inline_tasks) |> ILPShowcase.check!()
+2 = membership["Clauses"]
+IO.puts(membership["Program"])
+Enum.filter(membership["Rows"], &(&1.split == "test"))
+```
+
+The emitted theory has a head-match base case and a recursive tail case.
+The training data uses numbers; our held-out cases use atoms, include a longer
+list, and check both absence and the empty list. Each recursive call shortens
+a finite list. The learned clauses are actually installed by Aleph and queried
+by SWI; the notebook does not substitute Elixir's list membership function.
+
+## 7. Make backend equality earn its keep
+
+We first check each successful task against expected labels, then compare
+Port and NIF predictions. Agreement alone could let two identical mistakes
+pass. The deliberate memorization experiment is checked for its specific
+failure pattern, rather than counted as a correct classifier.
+
+```elixir
+for {task, limit} <- [trains: 4, membership: 4] do
+  port = ILPShowcase.learn(:aleph, task, limit, :port, inline_tasks) |> ILPShowcase.check!()
+  nif = ILPShowcase.learn(:aleph, task, limit, :nif, inline_tasks) |> ILPShowcase.check!()
+  true = port["Rows"] == nif["Rows"]
+  true = port["Clauses"] == nif["Clauses"]
+  %{task: task, clauses: port["Clauses"], scores: ILPShowcase.scores(port)}
+end
+```
+
+Counts and times include saturation, reduction, induction and diagnostic
+queries; they are not a pure `induce/1` benchmark.
+
+## 8. Design the next experiment
+
+1. Remove `closed/1` from the train determinations and see whether any compact
+   alternative still fits. Test its meaning with a new train, not just its
+   training score.
+2. Raise `noise` and add a contradictory label. Inspect how the scoring and
+   selected hypothesis change; training consistency is no longer the same goal.
+3. Remove the recursive membership determination. Inspect which finite cases
+   can still be explained and which longer lists break the learned theory.
+4. Compare the two notebooks: Metagol restricts clauses through metarules and
+   can invent predicates; this Aleph exercise restricts clauses through modes,
+   determinations, saturation and search bounds. Neither bias is supplied by
+   the examples alone.
+

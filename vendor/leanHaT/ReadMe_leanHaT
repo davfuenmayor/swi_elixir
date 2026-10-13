@@ -1,0 +1,66 @@
+--------------------------
+leanHaT ReadMe File (v1.0)
+
+-----------
+Description
+
+leanHaT is a compact sequent theorem prover for the first-order
+logic of Here and There (HT) implemented in Prolog. See the web
+site at http://www.leancop.de/leanhat/ for more details.
+
+--------
+Contents
+
+ReadMe_leanHaT       - this ReadMe file
+leanhat.sh           - shell script to invoke leanHaT
+leanhat.pl           - the leanHaT core prover
+                       (leanhat_swi.pl for SWI Prolog)
+leanhat_main.pl      - invokes the leanHaT core prover
+nanocop_tptp2.pl     - translates problems from TPTP syntax
+
+------------
+Installation
+
+Set the path for the Prolog system (ECLiPSe 5.x or SWI) and the
+path for the leanHaT prover in the file leanhat.sh.
+
+---------
+Execution
+
+./leanhat.sh %s
+where %s is the name of the problem file.
+
+Example:  ./leanhat.sh SET/SET009+3
+
+Output if formula is valid:   %s is an HT Theorem
+Output if formula is invalid: %s is an HT Non-Theorem
+
+Example:  SET/SET009+3 is an HT Theorem
+
+------
+Syntax
+
+The problem file has to contain a Prolog term of the form
+   f(<formula>).
+in which <formula> is a first-order formula built from Prolog
+terms (atomic formulae), the logical connectives '~' (negation),
+';' (disjunction), ',' (conjunction), '=>' (implication), '<=>'
+(equivalence), and the logical quantifiers 'all X:' (universal)
+and 'ex X:' (existential) where X is a Prolog variable.
+
+Example:  f( ((p , all X:(p=>q(X))) => q(a)) ).
+
+Alternatively, the problem file may contain a formula in TPTP
+syntax (see http://www.tptp.org). If the problem file contains
+equality ('=') all equality axioms are added automatically.
+
+-----------
+At a Glance
+
+System:  leanHaT
+Version: 1.0
+URL:     http://www.leancop.de/leanhat/
+Command: ./leanhat.sh %s
+Format:  leancop/nanocop or (raw) tptp
+Output:  - valid:            %s is an HT Theorem
+         - invalid:          %s is an HT Non-Theorem
