@@ -41,7 +41,10 @@ defmodule SWI.ShowcaseTest do
           {:nanocop, "vendor/nanoCoP-i-HT/nanocopi20_swi.pl"}
         ] do
       [row] = SWI.query(session, "prover_showcase:source(#{prover},File,Line)") |> Enum.to_list()
-      assert row["File"] == {:atom, Path.expand(path)}
+      assert {:atom, reported} = row["File"]
+      reported = :json.encode(reported) |> IO.iodata_to_binary()
+      expected = :json.encode(Path.expand(path)) |> IO.iodata_to_binary()
+      assert SWI.call(session, "same_file(#{reported},#{expected})") == {:ok, true}
       assert row["Line"] > 0
     end
   end

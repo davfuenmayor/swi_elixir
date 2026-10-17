@@ -1,19 +1,32 @@
+# Build caches and extracted runtimes (native/ archives are distributable).
 /_build/
+/_native/
+/priv/swipl/
+/priv/.unpack-*/
 /deps/
 /priv/*.so
 /priv/*.dylib
 /priv/*.dll
+/priv/*.dll.a
+/priv/*.lib
+
+# Diagnostics and local packages.
 /erl_crash.dump
 /rebar3.crashdump
 /core
 /core.[0-9]*
+*.stackdump
 /cover/
-/.elixir_ls/
 /.fetch
 /*.ez
 /*.tar
 *.beam
+
+# Editor and OS files.
+/.elixir_ls/
 .DS_Store
+Thumbs.db
+Desktop.ini
 *.swp
 *.swo
 *~

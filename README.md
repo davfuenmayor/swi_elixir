@@ -21,46 +21,71 @@ SWI.call(prolog, "fail")        # {:ok, false}
 SWI.stop(prolog)
 ```
 
-## Build on Linux
+## Platforms and native bundles
 
-Tested locally with **SWI-Prolog 10.0.1**, **Elixir 1.20.4**, **OTP 29.1.1**
-(ERTS 17.1), x86-64 Linux. The existing checkout is 10.1 development, so the
-installer builds its stable `V10.0.1` tag in a temporary worktree without
-changing the checkout's branch or files.
+Requires **Elixir 1.18+ and OTP 27+**, both 64-bit. Mix selects a bundle for the
+runtime's OS and CPU, checks its SHA-256, and unpacks SWI-Prolog 10.0.1 and the
+NIF into the application. Both backends use it automatically, including in
+Livebook. Available bundles need no separate SWI installation or compiler.
 
-Prerequisites: Elixir >= 1.18, OTP >= 27 (built-in `:json`), a C compiler, make,
-pkg-config, SWI with multithreading, development headers and shared `libswipl`,
-and the `http/json`, `time`, `readutil`, and (for Port) `unix` libraries. For the pinned source build:
+| Platform | Minimum / current status |
+| --- | --- |
+| Linux x86-64 | glibc 2.31+; bundled and tested natively |
+| Linux ARM64 | glibc 2.31+; bundle built; validation in progress |
+| Windows x86-64 | Windows 10+; bundled; full suite passes under Wine; native Windows validation pending |
+| macOS Intel | macOS 12+; source-build path prepared; bundle and native validation pending |
+| macOS Apple Silicon | macOS 12+; source-build path prepared; bundle and native validation pending |
+
+macOS bundles cannot yet be advertised as working out of the box: a macOS
+build/test runner is needed. Alpine/musl, 32-bit runtimes, and Windows ARM64
+are excluded. Native libraries must match the architecture of the running
+BEAM, including when it runs under CPU emulation.
 
 ```sh
-apt-get update
-apt-get install -y build-essential cmake ninja-build pkg-config libgmp-dev \
-  libssl-dev zlib1g-dev libossp-uuid-dev
-# Run inside swi_elixir, using the already cloned SWI repo:
-scripts/install-swi.sh ../swipl-devel
 mix compile
+```
+
+The runtime uses LibBF and static zlib; GMP, readline, TLS, and GUI extensions
+are excluded. See [MULTIPLATFORM.md](MULTIPLATFORM.md) for build and test
+procedures, recorded results, and remaining work; component licenses are in
+[native/](native/README.md). Restart the BEAM/Livebook runtime after changing
+bundles, since an initialized embedded SWI remains loaded for the VM lifetime.
+
+### Build or bring your own bundle
+
+Windows and macOS users can build SWI and the NIF together against their local
+toolchain. This permits CPU tuning and checking compatibility on the actual
+machine; performance and reliability improvements should be measured and tested.
+
+Install a C toolchain, git, curl, make, CMake, Ninja, and Elixir/OTP. On macOS,
+use Xcode Command Line Tools plus `brew install cmake ninja`. On Windows, use
+an **MSYS2 MINGW64** shell with the MinGW-w64 toolchain and Erlang/Elixir on
+`PATH`. From this checkout:
+
+```sh
+git clone --branch V10.0.1 https://github.com/SWI-Prolog/swipl-devel.git ../swipl-devel
+scripts/build-runtime.sh ../swipl-devel
+mix clean
 mix test
 ```
 
-If cloning elsewhere, use `git clone --branch V10.0.1
-https://github.com/SWI-Prolog/swipl-devel.git` and pass that checkout to the
-installer. Installation defaults to `/usr/local`; set `SWI_PREFIX` for another
-prefix and put its `bin` on `PATH` and `share/pkgconfig` on `PKG_CONFIG_PATH`.
-`BUILD_JOBS` controls build concurrency. The SWI tag emits a QLF warning about
-an unrelated `json_rpc_common` file during its own build; the JSON bridge
-library builds and is covered by the integration tests.
+The script detects the native target and writes `native/swi-10.0.1-<target>.tar.gz`
+and its `.sha256` file. Subsequent compilation uses that bundle automatically.
+Optional `CFLAGS` allow local CPU tuning: `-O3 -mcpu=native` on Apple Silicon,
+or `-O3 -march=native` on Intel/AMD. Keep CPU-tuned bundles on matching CPUs.
+See [build and test instructions](MULTIPLATFORM.md) for prerequisites and validation.
 
-The Port backend finds `swipl` on `PATH`. Override with `SWIPL=/path/to/swipl`
-or `SWI.start_link(backend: :port, swipl: "/path/to/swipl")`.
-The native compiler uses `pkg-config swipl` and the running OTP's headers.
-`make` builds `priv/swi_nif.so`; `mix compile` runs it automatically. Its runtime
-search path comes from pkg-config's libdir, so custom prefixes work without
-changing the system loader configuration. Set `ERL_INCLUDE` if needed.
-`SWI_ELIXIR_SKIP_NIF=1 mix compile` supports a Port-only installation.
-After changing SWI/OTP installations, run `make clean && mix compile`.
+To use a bundle supplied from elsewhere, set **`SWI_ELIXIR_BUNDLE`** to its
+absolute native path before `mix compile` or starting Livebook, and keep its
+matching `.sha256` alongside it. It contains the SWI runtime, libraries, and
+matching NIF; target and checksum checks still apply. Normal bundled installs
+need no environment variables.
+
+For a separately installed SWI executable, the Port backend also accepts
+`SWI.start_link(backend: :port, swipl: "/path/to/swipl")` or `SWIPL`.
+The NIF uses the selected complete bundle.
 
 ## Queries, loading, and ownership
-
 ```elixir
 {:ok, prolog} = SWI.start_link(backend: :nif)
 :ok = SWI.load(prolog, "examples/family.pl")
@@ -251,10 +276,18 @@ notation changes, expected results and diagnostic limitations.
 `nanocop:prove_text/3` optionally returns the upstream connection proof;
 leanHaT's adapter exposes success only.
 
-Open the six standalone notebooks with an installed Livebook:
+Start at the [Livebook introduction](livebooks/intro.livemd), which links the
+six standalone lessons. Install Livebook once if
+needed (the lessons were checked with version 0.19.9):
 
 ```sh
-SWI_ELIXIR_PATH="$PWD" livebook server livebooks/
+mix escript.install hex livebook 0.19.9 --force
+```
+
+Launch it from the checkout:
+
+```sh
+~/.mix/escripts/livebook server livebooks/intro.livemd
 ```
 
 1. [Basic Prolog](livebooks/01_basic.livemd): unification, recursion, backend equality.
@@ -266,6 +299,13 @@ SWI_ELIXIR_PATH="$PWD" livebook server livebooks/
    higher-order nested-list transformation and clause-budget experiments.
 6. [Aleph](livebooks/06_aleph.livemd): Michalski’s trains, bottom clauses,
    mode declarations, memorization versus generalization, and recursive membership.
+
+Each lesson installs this checkout using its location and pins Kino 0.19.0
+for tables and diagrams. Use a local Livebook runtime and evaluate from top
+to bottom; the first dependency installation needs network access. Task source
+and data are inline, with shared adapters for the vendored systems. No
+project-path environment variable is required. Prediction exercises include
+hints, and the first lesson explains session cleanup and reevaluation.
 
 The ILP lessons execute the real upstream learners through both backends and
 check learned programs on training and project-authored diagnostic cases.
@@ -283,7 +323,7 @@ ERL_FLAGS='+S 1:1' mix test test/swi_test.exs
 mix run examples/provers.exs
 mix run examples/bench.exs
 ERL_FLAGS='+S 1:1' mix test test/ilp_test.exs
-mix run scripts/check_livebooks.exs
+elixir scripts/check_livebooks.exs
 ```
 
 Tests cover binding/variable identity, recursion, large replies, exceptions,

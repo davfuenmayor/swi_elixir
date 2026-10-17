@@ -114,15 +114,23 @@ var_index(Term, [_|Vs], N, Index) :- N1 is N+1, var_index(Term, Vs, N1, Index).
 % The main thread keeps reading even while the worker searches. EOF means
 % the BEAM Port owner vanished: kill this disposable runtime immediately.
 main :-
-    use_module(library(unix)),
+    use_module(library(process)),
     current_output(Protocol),
     set_prolog_IO(user_input, user_error, user_error),
     thread_create(worker(Protocol), Worker, [detached(true)]),
     read_requests(Worker).
 read_requests(Worker) :-
     read_line_to_string(user_input, Line),
-    (Line == end_of_file -> current_prolog_flag(pid, Pid), kill(Pid, kill)
+    (Line == end_of_file -> kill_runtime
     ; thread_send_message(Worker, Line), read_requests(Worker)).
+kill_runtime :-
+    current_prolog_flag(pid, Pid),
+    (current_prolog_flag(windows, true) ->
+        getenv('SystemRoot', Root),
+        directory_file_path(Root, 'System32/taskkill.exe', Taskkill),
+        process_create(Taskkill, ['/F', '/PID', Pid],
+                       [stdin(null), stdout(null), stderr(null), detached(true)])
+    ; process_kill(Pid, kill)).
 worker(Protocol) :-
     catch(loop(Protocol), Error, (print_message(error, Error), halt(1))).
 loop(Protocol) :-

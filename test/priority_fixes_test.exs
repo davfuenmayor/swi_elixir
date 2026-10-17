@@ -153,7 +153,7 @@ defmodule SWI.PriorityFixesTest do
     {:os_pid, pid} = Port.info(:sys.get_state(session).transport, :os_pid)
     owner = search_until_killed(session)
     Process.exit(session, :kill)
-    wait_until(fn -> not File.exists?("/proc/#{pid}") end)
+    wait_until(fn -> not os_process_alive?(pid) end)
     wait_until(fn -> (new = Process.whereis(:reap_on_restart)) != nil and new != session end)
     assert SWI.call(:reap_on_restart, "true") == {:ok, true}
     wait_until(fn -> not Process.alive?(owner) end)
@@ -170,7 +170,7 @@ defmodule SWI.PriorityFixesTest do
     {:os_pid, pid} = Port.info(:sys.get_state(session).transport, :os_pid)
     owner = search_until_killed(session)
     Supervisor.stop(supervisor)
-    wait_until(fn -> not File.exists?("/proc/#{pid}") end)
+    wait_until(fn -> not os_process_alive?(pid) end)
     wait_until(fn -> not Process.alive?(owner) end)
   end
 

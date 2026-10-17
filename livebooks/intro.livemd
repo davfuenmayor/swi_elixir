@@ -1,0 +1,92 @@
+# Learn Prolog, proof search, and logic programming with Elixir
+
+## Introduction
+
+Six guided notebooks introduce the SWI-Prolog wrapper, constraint search,
+automated theorem proving, and learning programs from examples. Elixir
+coordinates the work and presents results; SWI-Prolog and the vendored
+provers and learners perform the actual computation.
+
+Start with **Getting started** if you are new to Livebook or the wrapper.
+Each chapter is independent and defines its own examples. Worked examples
+check their stated answers; prediction exercises invite you to change one
+input and compare the result.
+
+## Open your first notebook
+
+1. Use a [platform with an available bundle](../README.md#platforms-and-native-bundles), Elixir 1.18+, and OTP 27+.
+   SWI-Prolog is bundled: no separate installation or compiler is needed.
+2. If Livebook is not installed, install the version used to check these
+   lessons:
+
+   ```sh
+   mix escript.install hex livebook 0.19.9 --force
+   ```
+
+3. Keep the repository layout intact and start Livebook from the project
+   directory. The full executable path avoids needing to configure your shell's
+   `PATH`:
+
+   ```sh
+   ~/.mix/escripts/livebook server livebooks/intro.livemd
+   ```
+
+   On Windows, use PowerShell:
+
+   ```powershell
+   & "$HOME\.mix\escripts\livebook.bat" server livebooks/intro.livemd
+   ```
+
+4. Open [Getting started](01_basic.livemd), use the default **Standalone**
+   runtime, and choose **Evaluate all**, or evaluate cells one at a time from
+   the top.
+5. Wait for the first setup cell to finish. It installs this checkout and
+   Kino 0.19.0 for tables and diagrams; the first installation needs network
+   access. No project-path environment variable is needed.
+
+Keep the checkout available to the Livebook runtime; the setup cell uses its
+relative location. See the [platform status](../README.md#platforms-and-native-bundles) for available bundles and validation limits. Once setup finishes, the lessons use local source and
+data and do not contact solver services.
+
+## Chapters
+
+### Learn the wrapper
+
+* [Getting started with SWI-Prolog](01_basic.livemd): goals, decoded values,
+  source loading, state changes, lazy answers, and errors.
+* [Port and NIF](04_backends.livemd): scoped sessions, measured calls, timeout
+  recovery, and process isolation.
+
+### Explore search
+
+* [Real proof search](02_provers.livemd): quantified chains, pigeonhole
+  reasoning, HT versus intuitionistic logic, and actual returned proofs.
+* [Constraint search](03_search.livemd): N-queens, displayed boards, finite
+  searches, and finite prefixes of infinite relations.
+
+### Learn programs from examples
+
+* [Metagol](05_metagol.livemd): predicate invention, recursive ancestry,
+  higher-order list transformations, and clause budgets.
+* [Aleph](06_aleph.livemd): modes, bottom clauses, relational classification,
+  overfitting, and recursive membership.
+
+## Work through a chapter
+
+Read the explanation before evaluating its cell. Inspect the returned values
+and tables, then change one input at a time. Expand an exercise's hint after
+making a prediction. Expected-answer checks describe the original example;
+update them when your edit deliberately changes its answer.
+
+Chapters with an interactive session end with a **Close the session** cell.
+Run it before creating a replacement session. After closing, reevaluate from
+the beginning. Chapters using a scoped helper close each session as soon as
+its workflow finishes. Restart the notebook runtime if you want to discard
+all embedded SWI state.
+
+All task definitions and training data are inline. Small shared adapters load
+the vendored systems, coordinate their state, and format or evaluate results.
+Kino displays those returned results; it does not perform proof search or
+learning. Source links at the beginning of each chapter identify the systems
+and examples; their terms are described in the
+[third-party notices](../THIRD_PARTY_NOTICES.md).

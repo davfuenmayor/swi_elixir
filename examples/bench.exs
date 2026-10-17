@@ -23,7 +23,7 @@ IO.inspect(
   %{
     elixir: System.version(),
     otp: :erlang.system_info(:otp_release),
-    swi: System.cmd("swipl", ["--version"]) |> elem(0) |> String.trim()
+    swi: System.cmd(SWI.Runtime.executable(), ["--version"]) |> elem(0) |> String.trim()
   },
   label: "versions"
 )

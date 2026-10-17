@@ -1,16 +1,50 @@
-# Search and nondeterminism
-
-Source: [SWI-Prolog CLP(FD) guide](https://www.swi-prolog.org/pldoc/man?section=clpfd).
-
-N-queens asks for one queen in each column with no attacking rows or diagonals.
-SWI's `clpfd` library propagates constraints; `labeling/2` searches assignments.
-Elixir controls how many answers to pull. The project example uses the standard
-pairwise row/diagonal constraints.
+# Constraint search and nondeterminism
 
 ```elixir
-project = System.fetch_env!("SWI_ELIXIR_PATH")
-Mix.install([{:swi_elixir, path: project}])
-search_program = """
+Mix.install([
+  {:swi_elixir, path: Path.expand("..", __DIR__)},
+  {:kino, "== 0.19.0"}
+])
+```
+
+## Introduction
+
+N-queens asks for one queen in each column with no attacking rows or diagonals.
+This notebook uses SWI-Prolog's [CLP(FD) library](https://www.swi-prolog.org/pldoc/man?section=clpfd)
+to state the constraints, then lets Elixir decide how many solutions to consume.
+The board displays are built from the returned placements.
+
+Evaluate from top to bottom in a local Livebook runtime on a [supported platform](../README.md#platforms-and-native-bundles).
+Setup installs this checkout, its bundled SWI runtime, and Kino; the first dependency installation needs
+network access. All search data is defined below.
+
+[All chapters](intro.livemd).
+
+* [Start a session](#preliminaries-start-a-session)
+* [State the constraints](#state-the-problem-in-prolog)
+* [Exhaust a finite search](#exhaust-a-finite-search)
+* [Take only three solutions](#stop-after-three-solutions)
+* [Use an infinite relation](#consume-a-finite-prefix-of-an-infinite-relation)
+
+## Preliminaries: start a session
+
+The same query and loading API works with `:port` and `:nif`. Choose a backend
+here and close the session in the final cell before starting the workflow again.
+
+```elixir
+import ExUnit.Assertions
+backend = :port
+{:ok, session} = SWI.start_link(backend: backend)
+```
+
+## State the problem in Prolog
+
+`Rows` has one element per column. Its value is that column's queen row, so
+`[2,4,1,3]` means queens at column/row pairs `(1,2)`, `(2,4)`, `(3,1)`, `(4,3)`.
+The constraints eliminate attacks; `labeling/2` searches for complete placements.
+
+```elixir
+search_program = ~S"""
 :- module(search, [queens/2]).
 :- use_module(library(clpfd)).
 queens(N, Rows) :-
@@ -20,81 +54,129 @@ safe([]).
 safe([Q|Qs]) :- diagonals(Qs, Q, 1), safe(Qs).
 diagonals([], _, _).
 diagonals([Q|Qs], Q0, D) :-
-    Q0 #\\= Q, abs(Q0-Q) #\\= D, D1 #= D+1, diagonals(Qs, Q0, D1).
+    Q0 #\= Q, abs(Q0-Q) #\= D, D1 #= D+1, diagonals(Qs, Q0, D1).
 """
-load_prolog = fn session, source ->
-  path = Path.join(System.tmp_dir!(), "swi-elixir-search.pl")
-  File.write!(path, source)
-  try do
-    SWI.load(session, path)
-  after
-    File.rm(path)
-  end
-end
-with_search = fn backend, fun ->
-  {:ok, session} = SWI.start_link(backend: backend)
-  try do
-    :ok = load_prolog.(session, search_program)
-    fun.(session)
-  after
-    SWI.stop(session)
-  end
+```
+
+The complete source is inline. `load/3` expects a file, so write it temporarily
+and remove it after SWI has loaded it. Reusing the filename makes reevaluation
+a reconsult of the same module.
+
+```elixir
+path = Path.join(System.tmp_dir!(), "swi-livebook-search-#{System.pid()}.pl")
+File.write!(path, search_program)
+
+try do
+  :ok = SWI.load(session, path)
+after
+  File.rm!(path)
 end
 ```
 
-## Four queens: exhaust a finite search
+## Exhaust a finite search
 
-Each cell releases its sessions even after an assertion fails, so it can be
-reevaluated without accumulating engines.
+Four queens has two solutions in this representation. We collect the entire
+finite search with `Enum.to_list/1` and inspect the returned integer lists.
 
 ```elixir
-answers = for backend <- [:port, :nif], into: %{} do
-  rows = with_search.(backend, fn session ->
-    SWI.query(session, "search:queens(4, Rows)") |> Enum.map(& &1["Rows"])
-  end)
-  [[2, 4, 1, 3], [3, 1, 4, 2]] = rows
-  {backend, rows}
-end
-true = answers.port == answers.nif
-answers
+four_queens = SWI.query(session, "search:queens(4, Rows)") |> Enum.map(& &1["Rows"])
+assert Enum.sort(four_queens) == [[2, 4, 1, 3], [3, 1, 4, 2]]
+
+Kino.DataTable.new(
+  for {rows, index} <- Enum.with_index(four_queens, 1),
+      do: %{solution: index, rows: inspect(rows)}
+)
 ```
 
-## Eight queens: stop after three solutions
-
-The stream runs once and preserves its search state between pulls. Stopping
-closes the engine and runs Prolog cleanup handlers. We check that the three
-answers are distinct valid placements, rather than requiring a search order.
+To display a board, put a queen at the returned row for each column. The
+renderer contains no solving logic.
 
 ```elixir
-for backend <- [:port, :nif] do
-  with_search.(backend, fn session ->
-    rows = SWI.query(session, "search:queens(8, Rows)") |> Enum.take(3) |> Enum.map(& &1["Rows"])
-    true = length(Enum.uniq(rows)) == 3
-    for placement <- rows do
-      true = Enum.sort(placement) == Enum.to_list(1..8)
-      indexed = Enum.with_index(placement)
-      true = Enum.all?(indexed, fn {row, col} ->
-        Enum.all?(indexed, fn {other, j} -> col == j or abs(row - other) != abs(col - j) end)
-      end)
+board = fn placement ->
+  rows =
+    for row <- 1..length(placement) do
+      cells =
+        for {queen, column} <- Enum.with_index(placement, 1),
+            do: {"column #{column}", if(queen == row, do: "♛", else: "·")}
+
+      Map.new([{"row", row} | cells])
     end
-    {:ok, true} = SWI.call(session, "true")
-    {backend, rows}
-  end)
+
+  keys = ["row" | Enum.map(1..length(placement), &"column #{&1}")]
+  Kino.DataTable.new(rows, keys: keys, sorting_enabled: false)
 end
+
+board.(hd(four_queens))
 ```
 
-## An infinite generator
+### Try it yourself
 
-A session has one active stream; use separate sessions for concurrent searches.
-An unbounded generator is usable when Elixir consumes a finite prefix.
+Ask for `search:queens(3, Rows)` in a new cell and collect its answers. Predict
+whether an empty list means a failed operation or a completed search.
+
+<details>
+<summary>Hint and expected result</summary>
+
+Three queens has no nonattacking placement. The stream finishes with zero
+answers; that is a successful search with no solutions, rather than an error.
+
+</details>
+
+## Stop after three solutions
+
+For eight queens, consume only three placements. The stream preserves SWI's
+choice points between pulls and closes the remaining search on early halt.
+The assertions check the mathematical constraints independently of the solver.
 
 ```elixir
-for backend <- [:port, :nif] do
-  with_search.(backend, fn session ->
-    first_ten = SWI.query(session, "between(1, inf, N)") |> Enum.take(10) |> Enum.map(& &1["N"])
-    true = first_ten == Enum.to_list(1..10)
-    {:ok, true} = SWI.call(session, "true")
-    {backend, first_ten}
-  end)
+eight_queens =
+  SWI.query(session, "search:queens(8, Rows)")
+  |> Enum.take(3)
+  |> Enum.map(& &1["Rows"])
+
+assert length(Enum.uniq(eight_queens)) == 3
+
+for placement <- eight_queens do
+  assert Enum.sort(placement) == Enum.to_list(1..8)
+
+  for {row, column} <- Enum.with_index(placement),
+      {other, index} <- Enum.with_index(placement),
+      column != index do
+    assert abs(row - other) != abs(column - index)
+  end
 end
+
+{:ok, true} = SWI.call(session, "true")
+board.(hd(eight_queens))
 ```
+
+A session permits one active stream at a time. Use separate sessions for
+concurrent searches. If you suspend an enumerable manually, halt its
+continuation explicitly when finished with it.
+
+## Consume a finite prefix of an infinite relation
+
+An unbounded Prolog generator can be useful when Elixir asks for a finite
+prefix. Collecting the entire generator with `Enum.to_list/1` would never finish.
+
+```elixir
+first_ten = SWI.query(session, "between(1,inf,N)") |> Enum.take(10)
+assert Enum.map(first_ten, & &1["N"]) == Enum.to_list(1..10)
+Kino.DataTable.new(first_ten)
+```
+
+## Close the session
+
+```elixir
+:ok = SWI.stop(session)
+```
+
+## Choose your next step
+
+Try nine queens and take only five placements. Change `labeling([ff], Rows)`
+to `labeling([], Rows)` and observe whether the first placements or timings
+change while the constraints continue to hold.
+
+* [Backend comparison](04_backends.livemd): understand timeout scope and process isolation.
+* [Metagol](05_metagol.livemd): learn recursive programs from examples.
+* [All chapters](intro.livemd).

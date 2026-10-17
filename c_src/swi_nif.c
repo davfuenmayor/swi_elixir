@@ -1,12 +1,26 @@
 #define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
+#ifdef _WIN32
+/* OTP 27's allocation annotations describe functions, not Windows callbacks. */
+#include <erl_drv_nif.h>
+#undef ERL_NAPI_ATTR_MALLOC_U
+#undef ERL_NAPI_ATTR_MALLOC_US
+#undef ERL_NAPI_ATTR_MALLOC_D
+#define ERL_NAPI_ATTR_MALLOC_U
+#define ERL_NAPI_ATTR_MALLOC_US(size)
+#define ERL_NAPI_ATTR_MALLOC_D(dtor, pos)
+#endif
 #include <erl_nif.h>
 #include <SWI-Prolog.h>
-#include <pthread.h>
 #include <string.h>
-#include <dlfcn.h>
 #include <stdio.h>
 #include <errno.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <pthread.h>
+#include <dlfcn.h>
+#endif
 
 /* Admission bounds live engines, GC reapers, and failed reclamations together.
    Slots outlive resources, so even a failed reaper never loses its handle. */
@@ -22,9 +36,11 @@ typedef struct {
 } session;
 
 static engine_slot slots[CAPACITY];
-static pthread_mutex_t slots_lock = PTHREAD_MUTEX_INITIALIZER;
+static ErlNifMutex *slots_lock;
 static ErlNifResourceType *session_type;
-static pthread_mutex_t init_lock = PTHREAD_MUTEX_INITIALIZER;
+static ErlNifMutex *init_lock;
+/* SWI retains its arguments for the lifetime of the runtime. */
+static char *home_option;
 
 /* Fault injection exists only in separately compiled test libraries. */
 static int failpoint(const char *name) {
@@ -77,7 +93,7 @@ static int restore_engine(PL_engine_t previous) {
 }
 static engine_slot *reserve(void) {
   engine_slot *slot = NULL;
-  pthread_mutex_lock(&slots_lock);
+  enif_mutex_lock(slots_lock);
   for (int i = 0; i < CAPACITY; i++) {
     if (slots[i].state == SLOT_FREE) {
       slot = &slots[i];
@@ -85,13 +101,13 @@ static engine_slot *reserve(void) {
       break;
     }
   }
-  pthread_mutex_unlock(&slots_lock);
+  enif_mutex_unlock(slots_lock);
   return slot;
 }
 static void release_slot(engine_slot *slot) {
-  pthread_mutex_lock(&slots_lock);
+  enif_mutex_lock(slots_lock);
   memset(slot, 0, sizeof(*slot));
-  pthread_mutex_unlock(&slots_lock);
+  enif_mutex_unlock(slots_lock);
 }
 /* On destruction failure the slot retains ownership; callers may retry.
    Cleanup exceptions do not prevent destruction, but still reach the caller. */
@@ -141,12 +157,18 @@ static void *reap(void *ptr) {
   if (!slot->engine) {
     release_slot(slot);
   } else {
-    pthread_mutex_lock(&slots_lock);
+    enif_mutex_lock(slots_lock);
     slot->state = SLOT_QUARANTINED;
-    pthread_mutex_unlock(&slots_lock);
+    enif_mutex_unlock(slots_lock);
   }
   return NULL;
 }
+#ifdef _WIN32
+static DWORD WINAPI reap_windows(LPVOID ptr) {
+  reap(ptr);
+  return 0;
+}
+#endif
 static void destroy(ErlNifEnv *env, void *obj) {
   (void)env;
   session *s = obj;
@@ -157,31 +179,40 @@ static void destroy(ErlNifEnv *env, void *obj) {
     release_slot(slot);
     return;
   }
-  pthread_t thread;
-  pthread_mutex_lock(&slots_lock);
+  enif_mutex_lock(slots_lock);
   slot->state = SLOT_REAPING;
-  pthread_mutex_unlock(&slots_lock);
+  enif_mutex_unlock(slots_lock);
+#ifdef _WIN32
+  HANDLE thread = failpoint("reaper") ? NULL : CreateThread(NULL, 0, reap_windows, slot, 0, NULL);
+  int rc = thread ? 0 : EAGAIN;
+  if (thread) CloseHandle(thread);
+#else
+  pthread_t thread;
   int rc = failpoint("reaper") ? EAGAIN : pthread_create(&thread, NULL, reap, slot);
   if (rc == 0) {
     rc = pthread_detach(thread);
     if (rc) fprintf(stderr, "swi_elixir: reaper detach failed: %s\n", strerror(rc));
-  } else {
-    pthread_mutex_lock(&slots_lock);
+    return;
+  }
+#endif
+  if (rc) {
+    enif_mutex_lock(slots_lock);
     slot->state = SLOT_QUARANTINED;
-    pthread_mutex_unlock(&slots_lock);
+    enif_mutex_unlock(slots_lock);
     fprintf(stderr, "swi_elixir: native engine quarantined; reaper failed: %s\n", strerror(rc));
   }
 }
 static int initialize(void) {
-  pthread_mutex_lock(&init_lock);
+  enif_mutex_lock(init_lock);
   int ok = 1;
   if (!PL_is_initialised(NULL, NULL)) {
     /* SWI retains argv for the lifetime of the runtime. */
-    static char *argv[] = {"swi_elixir", "-q", "--nosignals", "--no-packs", "-f", "none", NULL};
-    ok = PL_initialise(6, argv);
+    static char *argv[] = {"swi_elixir", NULL, "-q", "--nosignals", "--no-packs", "-f", "none", NULL};
+    argv[1] = home_option;
+    ok = PL_initialise(7, argv);
     if (ok) ok = PL_set_engine(NULL, NULL) == PL_ENGINE_SET;
   }
-  pthread_mutex_unlock(&init_lock);
+  enif_mutex_unlock(init_lock);
   return ok;
 }
 /* Loading and RPC share one checked FLI lifecycle. Only RPC has an output. */
@@ -285,27 +316,49 @@ static ERL_NIF_TERM close_session(ErlNifEnv *env, int argc, const ERL_NIF_TERM a
 static ERL_NIF_TERM stats(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]) {
   (void)argc; (void)argv;
   unsigned int engines = 0, reapers = 0, quarantined = 0;
-  pthread_mutex_lock(&slots_lock);
+  enif_mutex_lock(slots_lock);
   for (int i = 0; i < CAPACITY; i++) {
     engines += slots[i].state != SLOT_FREE;
     reapers += slots[i].state == SLOT_REAPING;
     quarantined += slots[i].state == SLOT_QUARANTINED;
   }
-  pthread_mutex_unlock(&slots_lock);
+  enif_mutex_unlock(slots_lock);
   ERL_NIF_TERM keys[] = {atom(env,"capacity"), atom(env,"engines"), atom(env,"reapers"), atom(env,"quarantined")};
   ERL_NIF_TERM values[] = {enif_make_uint(env,CAPACITY), enif_make_uint(env,engines), enif_make_uint(env,reapers), enif_make_uint(env,quarantined)};
   ERL_NIF_TERM result;
   return enif_make_map_from_arrays(env, keys, values, 4, &result) ? result : error(env,"out_of_memory");
 }
 static int load(ErlNifEnv *env, void **priv, ERL_NIF_TERM info) {
-  (void)priv; (void)info;
-  Dl_info self;
+  (void)priv;
+  ErlNifBinary home;
+  if (!enif_inspect_binary(env, info, &home) || memchr(home.data, 0, home.size)) return -1;
+#ifdef _WIN32
+  HMODULE self;
+  if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                         (LPCWSTR)(void *)destroy, &self)) return -1;
+#else
+  Dl_info self, runtime;
   if (!dladdr((void *)destroy, &self) ||
-      !dlopen(self.dli_fname, RTLD_NOW | RTLD_NODELETE)) return -1;
-  if (!dlopen("libswipl.so", RTLD_NOW | RTLD_GLOBAL)) return -1;
+      !dlopen(self.dli_fname, RTLD_NOW)) return -1;
+  if (!dladdr((void *)PL_initialise, &runtime) ||
+      !dlopen(runtime.dli_fname, RTLD_NOW | RTLD_GLOBAL)) return -1;
+#endif
   session_type = enif_open_resource_type(env, NULL, "swi_session", destroy,
                                         ERL_NIF_RT_CREATE, NULL);
-  return session_type ? 0 : -1;
+  if (!session_type) return -1;
+  slots_lock = enif_mutex_create("swi_slots");
+  init_lock = enif_mutex_create("swi_init");
+  home_option = enif_alloc(home.size + sizeof("--home="));
+  if (!slots_lock || !init_lock || !home_option) {
+    if (slots_lock) enif_mutex_destroy(slots_lock);
+    if (init_lock) enif_mutex_destroy(init_lock);
+    if (home_option) enif_free(home_option);
+    return -1;
+  }
+  memcpy(home_option, "--home=", 7);
+  memcpy(home_option + 7, home.data, home.size);
+  home_option[7 + home.size] = 0;
+  return 0;
 }
 static ErlNifFunc functions[] = {
   {"open", 1, open_session, ERL_NIF_DIRTY_JOB_CPU_BOUND},

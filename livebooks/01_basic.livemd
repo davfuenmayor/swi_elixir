@@ -1,101 +1,270 @@
-# Prolog from Elixir
-
-Source: [SWI-Prolog](https://github.com/SWI-Prolog/swipl-devel).
-
-Queries are ordinary Prolog text. SWI keeps its choice points while Elixir
-pulls answers. Port and NIF use the same API and term representation.
-Before starting Livebook, set `SWI_ELIXIR_PATH` to the absolute project path,
-install SWI and build the NIF as described in the README.
+# Getting started with SWI-Prolog
 
 ```elixir
-project = System.fetch_env!("SWI_ELIXIR_PATH")
-Mix.install([{:swi_elixir, path: project}])
-family = """
-:- module(family, [ancestor/2]).
+Mix.install([
+  {:swi_elixir, path: Path.expand("..", __DIR__)},
+  {:kino, "== 0.19.0"}
+])
+```
+
+## Introduction
+
+This notebook introduces **the Elixir wrapper**: starting a session, asking
+questions, reading values, loading a program, and releasing resources.
+[SWI-Prolog](https://github.com/SWI-Prolog/swipl-devel) parses the source and
+performs unification and search. Elixir orchestrates the work and displays
+its results.
+
+Evaluate the notebook from top to bottom in a local Livebook runtime. Setup
+installs this checkout, its bundled SWI runtime, and Kino for tables and
+diagrams. On a [platform with an available bundle](../README.md#platforms-and-native-bundles), no separate SWI installation or compiler
+is needed. The initial Kino installation needs network access; examples use local data.
+
+For a tour of proof search, constraint programming, and program learning,
+start with the [tutorial chapters](intro.livemd).
+
+* [Start a session](#preliminaries-start-a-session)
+* [Read results](#read-results-as-elixir-values)
+* [Load and query a program](#load-a-small-program)
+* [Control a lazy search](#stop-a-search-early)
+* [Handle errors](#handle-errors)
+
+## Preliminaries: start a session
+
+`SWI` is the public API for both backends. Choose `:port` for a separate SWI
+process or `:nif` for embedded SWI. The functions and returned values are the
+same. Change this setting before evaluating the workflow from the beginning.
+
+```elixir
+import ExUnit.Assertions
+backend = :port
+{:ok, session} = SWI.start_link(backend: backend)
+```
+
+Keep this session across cells so later queries can use loaded predicates.
+Before reevaluating a session-creation cell, close the previous session using
+the final cell. Restarting the notebook runtime also releases its sessions.
+
+## Ask a question
+
+Use `call/3` when you need to know whether a goal has a solution. The goal is
+ordinary Prolog text, with an optional final period.
+
+```elixir
+{:ok, true} = SWI.call(session, "member(b,[a,b,c])")
+{:ok, false} = SWI.call(session, "member(z,[a,b,c])")
+```
+
+Both calls ran successfully. `false` means the search found no solution;
+parsing and execution errors use `{:error, reason}` instead.
+
+## Read results as Elixir values
+
+`query/3` returns a lazy enumerable of binding maps. A map's keys are variable
+names without Prolog punctuation. Enumerating asks SWI for successive answers.
+
+```elixir
+bindings = SWI.query(session, "X=f(a,[1,2]), Y=Z") |> Enum.to_list()
+[answer] = bindings
+assert answer["X"] == {:compound, "f", [{:atom, "a"}, [1, 2]]}
+assert answer["Y"] == answer["Z"]
+bindings
+```
+
+Atoms and functor names are binaries inside tagged tuples, so a query cannot
+fill the BEAM atom table. The equal `{:var, id}` values for `Y` and `Z` describe
+the same unbound variable. IDs only have meaning within that answer.
+
+```elixir
+Kino.DataTable.new(
+  for({name, value} <- answer, do: %{variable: name, value: inspect(value)}),
+  keys: [:variable, :value]
+)
+```
+
+| Prolog value            | Elixir value                       |
+| ----------------------- | ---------------------------------- |
+| `hello`                 | `{:atom, "hello"}`                 |
+| `42`, `3.5`             | integer, float                     |
+| `"hello"`               | binary                             |
+| `[a,1]`                 | `[{:atom, "a"}, 1]`                |
+| `f(a)`                  | `{:compound, "f", [{:atom, "a"}]}` |
+| unbound variable        | `{:var, id}`                       |
+| extended or cyclic term | `{:prolog, rendered_text}`         |
+
+## Load a small program
+
+Our application needs to follow a chain of parent relationships. This is the
+complete program: `parent/2` supplies the edges, and `ancestor/2` follows one
+or more edges. The module keeps these names separate from other examples.
+
+```elixir
+family = ~S"""
+:- module(family, [parent/2, ancestor/2]).
+:- dynamic parent/2.
 parent(ada, grace).
 parent(grace, alan).
 parent(alan, emmy).
 ancestor(X, Y) :- parent(X, Y).
 ancestor(X, Y) :- parent(X, Z), ancestor(Z, Y).
 """
-load_prolog = fn session, source ->
-  path = Path.join(System.tmp_dir!(), "swi-elixir-family.pl")
-  File.write!(path, source)
+```
+
+`load/3` takes a filename. We create a temporary file from the visible source
+and remove it after loading; the predicates stay available in the session.
+The stable filename allows SWI to reconsult the module when you rerun the cell.
+
+```elixir
+path = Path.join(System.tmp_dir!(), "swi-livebook-family-#{System.pid()}.pl")
+File.write!(path, family)
+
+try do
+  :ok = SWI.load(session, path)
+after
+  File.rm!(path)
+end
+```
+
+## Query the program
+
+Predict Ada's descendants before evaluating the next cell.
+
+```elixir
+descendants = SWI.query(session, "family:ancestor(ada, Who)") |> Enum.to_list()
+
+assert Enum.map(descendants, & &1["Who"]) == [
+         {:atom, "grace"},
+         {:atom, "alan"},
+         {:atom, "emmy"}
+       ]
+
+Kino.DataTable.new(for %{"Who" => {:atom, name}} <- descendants, do: %{descendant: name})
+```
+
+The diagram below is built from **queried parent facts**, rather than a second
+copy of the dataset. Changing those facts changes the displayed graph.
+
+```elixir
+edges = SWI.query(session, "family:parent(Parent, Child)") |> Enum.to_list()
+
+diagram =
+  "flowchart LR\n" <>
+    Enum.map_join(edges, "\n", fn edge ->
+      {:atom, parent} = edge["Parent"]
+      {:atom, child} = edge["Child"]
+      "  #{parent} --> #{child}"
+    end)
+
+Kino.Mermaid.new(diagram)
+```
+
+## Change state and query again
+
+The session retains loaded code and dynamic facts. Add one edge and ask the
+same question again. `descendants` remains the earlier Elixir snapshot.
+
+```elixir
+{:ok, true} = SWI.call(session, "assertz(family:parent(emmy,nora))")
+updated = SWI.query(session, "family:ancestor(ada, Who)") |> Enum.to_list()
+assert length(updated) == 4
+assert length(descendants) == 3
+Kino.DataTable.new(for %{"Who" => {:atom, name}} <- updated, do: %{descendant: name})
+```
+
+Reevaluating `assertz/1` adds another fact. Reload the program cell to restore
+its original facts before repeating the full workflow. Source loading can
+partially change code or state before reporting an error; it is not a
+transaction.
+
+### Try it yourself
+
+Ask `family:ancestor(Who,emmy)` in a new query cell. Predict the names before
+evaluating, then compare the bindings with the diagram.
+
+<details>
+<summary>Hint and expected result</summary>
+
+Ada, Grace, and Alan are ancestors of Emmy. Emmy is not her own ancestor in
+this acyclic program, and adding a child of Emmy does not add an ancestor of her.
+
+</details>
+
+## Stop a search early
+
+SWI retains the query's choice points while Elixir consumes answers.
+`Enum.take/2` closes the remaining search so the session can immediately be
+used again. Use a separate session for each concurrent stream.
+
+```elixir
+first_three = SWI.query(session, "between(1,inf,N)") |> Enum.take(3)
+assert Enum.map(first_three, & &1["N"]) == [1, 2, 3]
+{:ok, true} = SWI.call(session, "true")
+Kino.DataTable.new(first_three)
+```
+
+## Handle errors
+
+An exception from Prolog becomes a tagged error for `call/3`. An error during
+stream enumeration raises `SWI.Error` with the same reason.
+
+```elixir
+{:error, {:prolog, "oops"}} = SWI.call(session, "throw(oops)")
+
+stream_error =
   try do
-    SWI.load(session, path)
-  after
-    File.rm(path)
+    SWI.query(session, "throw(oops)") |> Enum.to_list()
+  rescue
+    error in SWI.Error -> error.reason
   end
-end
+
+assert stream_error == {:prolog, "oops"}
+{:ok, true} = SWI.call(session, "true")
+stream_error
 ```
 
-## Own and release a session
+The default timeout is five seconds per solution pull, excluding time spent
+consuming answers. Use the backend chapter for timeout and recovery examples.
 
-Each demonstration uses a persistent session for its queries, with `after`
-cleanup on success or error. Reevaluating a cell releases its previous work.
-The tiny family program and demonstrations were written for this project.
+## Choose a backend through the same API
+
+The independent operation below runs with both backends. Each session closes
+in an `after` block, including when a query or assertion raises.
 
 ```elixir
-with_session = fn backend, fun ->
-  {:ok, session} = SWI.start_link(backend: backend)
-  try do
-    fun.(session)
-  after
-    SWI.stop(session)
+answers =
+  for selected <- [:port, :nif], into: %{} do
+    {:ok, other} = SWI.start_link(backend: selected)
+
+    try do
+      {selected, SWI.query(other, "member(X,[a,b,c])") |> Enum.to_list()}
+    after
+      SWI.stop(other)
+    end
   end
-end
+
+assert answers.port == answers.nif
+Kino.DataTable.new(answers.port)
 ```
 
-## Unification and variable identity
+Port has a separate database per session. NIF sessions have independent query
+engines but share ordinary SWI modules and dynamic predicates within the BEAM
+VM. Coordinate loading and mutations when using the embedded backend.
 
-Atoms carry a tag and binary name, avoiding new BEAM atoms from arbitrary
-Prolog output. Repeated variables share an ID within an answer; IDs have no
-meaning across answers.
+## Close the session
+
+Release the interactive session when finished. Values already returned to
+Elixir remain usable. To revisit the lesson, evaluate from the beginning.
 
 ```elixir
-for backend <- [:port, :nif] do
-  with_session.(backend, fn session ->
-    [answer] = SWI.query(session, "X=f(a, [1,2]), Y=Z") |> Enum.to_list()
-    {:compound, "f", [{:atom, "a"}, [1, 2]]} = answer["X"]
-    {:var, id} = answer["Y"]
-    {:var, ^id} = answer["Z"]
-    {backend, answer}
-  end)
-end
+:ok = SWI.stop(session)
 ```
 
-## Recursion and multiple solutions
+## Choose your next step
 
-The example program defines `ancestor/2` recursively. Prolog modules keep
-predicate names tidy. The assertion checks expected answers independently of
-backend agreement.
+Try adding another branch to the family and predicting the new answers before
+querying. Keep the relation and search in Prolog; use Elixir to consume results.
 
-```elixir
-answers = for backend <- [:port, :nif], into: %{} do
-  rows = with_session.(backend, fn session ->
-    :ok = load_prolog.(session, family)
-    SWI.query(session, "family:ancestor(ada, X)") |> Enum.map(& &1["X"])
-  end)
-  [{:atom, "grace"}, {:atom, "alan"}, {:atom, "emmy"}] = rows
-  {backend, rows}
-end
-true = answers.port == answers.nif
-answers
-```
-
-## Early stopping and failure
-
-`Enum.take/2` closes remaining choice points. The next query can immediately
-reuse the session. `call/3` returns a Boolean result or an error tuple.
-
-```elixir
-for backend <- [:port, :nif] do
-  with_session.(backend, fn session ->
-    [%{"X" => {:atom, "a"}}, %{"X" => {:atom, "b"}}] =
-      Enum.take(SWI.query(session, "member(X,[a,b,c])"), 2)
-    {:ok, false} = SWI.call(session, "fail")
-    {:ok, true} = SWI.call(session, "true")
-    {backend, :early_stop_and_reuse_checked}
-  end)
-end
-```
+* [Proof search](02_provers.livemd): run two real provers on quantified formulas.
+* [Constraint search](03_search.livemd): enumerate and visualize N-queens solutions.
+* [Backend comparison](04_backends.livemd): measure repeated calls and recovery.
+* [All chapters](intro.livemd).

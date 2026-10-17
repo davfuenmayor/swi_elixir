@@ -77,8 +77,8 @@ provides temporary predicate instrumentation. The diagnostic wraps leanHaT's
 recursive `prove/4` and nanoCoP's recursive `prove/10`, increments an engine-local
 counter, and always calls the original predicate. `setup_call_cleanup/3`
 removes the wrapper on success, failure, exceptions, timeout and early halt.
-The Livebook also obtains the original clause's source file/line from SWI and
-prints that file's SHA-256. Predicate wrappers are shared within a runtime, so
+The Livebook also obtains the original clause's source file from SWI and
+displays the kernel filename. Predicate wrappers are shared within a runtime, so
 these diagnostics must run serially with respect to other prover sessions.
 
 Counts demonstrate execution, not logical soundness or independent certificate

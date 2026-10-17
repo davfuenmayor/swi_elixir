@@ -9,31 +9,25 @@ defmodule SWI.NativeFailureTest do
     File.mkdir_p!(priv)
     File.cp_r!(Path.dirname(:code.which(SWI)), ebin)
     File.cp!("priv/bridge.pl", Path.join(priv, "bridge.pl"))
-    include = Path.join(:code.root_dir(), "usr/include")
-    {flags, 0} = System.cmd("pkg-config", ["--cflags", "--libs", "swipl"])
-    {libdir, 0} = System.cmd("pkg-config", ["--variable=libdir", "swipl"])
+    home = Path.join(priv, "swipl")
+    File.cp_r!(SWI.Runtime.home(), home)
+    ext = if :os.type() == {:win32, :nt}, do: "dll", else: "so"
 
-    args =
-      [
-        "-DSWI_NIF_TESTING",
-        "-std=c11",
-        "-O2",
-        "-Wall",
-        "-Wextra",
-        "-Werror",
-        "-fPIC",
-        "-shared",
-        "-pthread",
-        "-I#{include}",
-        "c_src/swi_nif.c",
-        "-o",
-        Path.join(priv, "swi_nif.so"),
-        "-ldl",
-        "-Wl,-rpath,#{String.trim(libdir)}"
-      ] ++ String.split(flags)
+    args = [
+      "-s",
+      "-B",
+      "SWI_HOME=#{home}",
+      "NIF_EXT=#{ext}",
+      "CFLAGS=-O2 -Wall -Wextra -Werror -DSWI_NIF_TESTING"
+    ]
 
-    {output, status} = System.cmd("cc", args, stderr_to_stdout: true)
-    assert status == 0, output
+    if prebuilt = System.get_env("SWI_TEST_NIF") do
+      File.cp!(prebuilt, Path.join(home, "bin/swi_nif.#{ext}"))
+    else
+      {output, status} = System.cmd("make", args, stderr_to_stdout: true)
+      assert status == 0, output
+    end
+
     %{ebin: ebin}
   end
 
@@ -169,7 +163,8 @@ defmodule SWI.NativeFailureTest do
     """)
   end
 
-  test "bursts of slow GC cleanup reclaim engines with bounded reaper work", ctx do
+  @tag skip: :os.type() != {:unix, :linux}
+  test "Linux bursts of slow GC cleanup reclaim engines with bounded OS threads and RSS", ctx do
     output =
       run_vm(ctx, """
       {:ok, first} = SWI.Native.open(bridge)
@@ -229,10 +224,13 @@ defmodule SWI.NativeFailureTest do
     end
     """
 
+    path = temporary("native.exs")
+    File.write!(path, prelude <> script <> "\nIO.puts(\"verified\")")
+
     {output, status} =
       System.cmd(
         "elixir",
-        ["-pa", ctx.ebin, "-e", prelude <> script <> "\nIO.puts(\"verified\")"],
+        ["-pa", ctx.ebin, path],
         env: [{"ERL_FLAGS", "+S 1:1"}],
         stderr_to_stdout: true
       )

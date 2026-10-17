@@ -74,8 +74,7 @@ defmodule SWI.RobustnessTest do
       ] do
     @payload payload
     test "malformed reply #{inspect(payload)} retires the child and recovers" do
-      executable = fake_child(@payload)
-      s = start_supervised!({SWI.Session, swipl: executable})
+      s = start_supervised!({SWI.Session, fake_child(@payload)})
       port = :sys.get_state(s).transport
       assert SWI.call(s, "true") == {:error, :invalid_reply}
       assert Process.alive?(s)
@@ -102,7 +101,7 @@ defmodule SWI.RobustnessTest do
   end
 
   test "EOF partway through a multi-chunk reply retires the child" do
-    s = start_supervised!({SWI.Session, swipl: fake_child(String.duplicate("x", 150_000), true)})
+    s = start_supervised!({SWI.Session, fake_child(String.duplicate("x", 150_000), true)})
     assert {:error, {:port_exit, _}} = SWI.call(s, "true")
     assert SWI.call(s, "true") == {:ok, true}
   end
@@ -110,7 +109,9 @@ defmodule SWI.RobustnessTest do
   test "startup validates executables and the bridge before returning a session" do
     Process.flag(:trap_exit, true)
     assert {:error, {:swipl_not_found, _}} = SWI.start_link(swipl: "/missing/swipl")
-    assert {:error, {:startup, {:error, reason}}} = SWI.start_link(swipl: "/bin/true")
+    exited = temporary("exit.pl")
+    File.write!(exited, ":- initialization(halt(0)).\n")
+    assert {:error, {:startup, {:error, reason}}} = SWI.start_link(bridge: exited)
     assert reason in [:port_down, {:port_exit, 0}]
     assert {:error, :invalid_cleanup_timeout} = SWI.start_link(cleanup_timeout: 0)
     assert {:error, :invalid_cleanup_timeout} = SWI.start_link(cleanup_timeout: 1.5)
@@ -132,41 +133,48 @@ defmodule SWI.RobustnessTest do
 
   test "readiness is bounded and failed children are killed" do
     Process.flag(:trap_exit, true)
-    executable = temporary("silent-child")
-    pid_file = executable <> ".pid"
+    bridge = temporary("silent-child.pl")
+    pid_file = bridge <> ".pid"
+    quoted_path = :json.encode(pid_file) |> IO.iodata_to_binary()
 
-    File.write!(executable, """
-    #!/usr/bin/env elixir
-    File.write!(#{inspect(pid_file)}, System.pid())
-    Process.sleep(60_000)
+    File.write!(bridge, """
+    :- module(swi_bridge, [main/0]).
+    main :- current_prolog_flag(pid, Pid),
+            setup_call_cleanup(open(#{quoted_path},write,F), write(F,Pid), close(F)),
+            sleep(60).
     """)
 
-    File.chmod!(executable, 0o755)
-    {elapsed, result} = :timer.tc(fn -> SWI.start_link(swipl: executable) end)
+    {elapsed, result} = :timer.tc(fn -> SWI.start_link(bridge: bridge) end)
     assert result == {:error, {:startup, {:error, :timeout}}}
     assert elapsed < 3_000_000
     pid = File.read!(pid_file)
-    wait_until(fn -> not File.exists?("/proc/#{pid}") end)
+    wait_until(fn -> not os_process_alive?(pid) end)
 
     for reply <- [~s({"status":"ready","protocol":2}), ~s({"status":"ok"})] do
-      File.write!(executable, """
-      #!/usr/bin/env elixir
-      File.write!(#{inspect(pid_file)}, System.pid())
-      IO.read(:stdio, :line)
-      IO.puts(#{inspect(reply)})
-      Process.sleep(60_000)
+      File.write!(bridge, """
+      :- module(swi_bridge, [main/0]).
+      :- use_module(library(readutil)).
+      main :- current_prolog_flag(pid, Pid),
+              setup_call_cleanup(open(#{quoted_path},write,F), write(F,Pid), close(F)),
+              read_line_to_string(user_input, _),
+              format('~s~n', [#{:json.encode(reply) |> IO.iodata_to_binary()}]),
+              flush_output, sleep(60).
       """)
 
-      assert SWI.start_link(swipl: executable) == {:error, {:startup, {:error, :invalid_reply}}}
+      assert SWI.start_link(bridge: bridge) == {:error, {:startup, {:error, :invalid_reply}}}
       pid = File.read!(pid_file)
-      wait_until(fn -> not File.exists?("/proc/#{pid}") end)
+      wait_until(fn -> not os_process_alive?(pid) end)
     end
 
-    File.write!(executable, "#!/missing/interpreter\n")
+    executable = temporary("invalid-executable")
+    File.write!(executable, "invalid executable\n")
+    File.chmod!(executable, 0o755)
 
     case SWI.start_link(swipl: executable) do
       {:error, {:spawn_failed, message}} -> assert is_binary(message)
-      {:error, {:startup, {:error, reason}}} -> assert reason in [:port_down, {:port_exit, 2}]
+      {:error, {:startup, {:error, :port_down}}} -> :ok
+      {:error, {:startup, {:error, {:port_exit, status}}}} -> assert status != 0
+      {:error, {:swipl_not_found, ^executable}} -> :ok
     end
   end
 
@@ -192,8 +200,11 @@ defmodule SWI.RobustnessTest do
       end
       """
 
+    script_path = temporary("startup.exs")
+    File.write!(script_path, script)
+
     {output, 0} =
-      System.cmd("elixir", ["-pa", Path.dirname(:code.which(SWI)), "-e", script],
+      System.cmd("elixir", ["-pa", Path.dirname(:code.which(SWI)), script_path],
         env: [{"ERL_FLAGS", "+S 1:1"}],
         stderr_to_stdout: true
       )
@@ -221,7 +232,7 @@ defmodule SWI.RobustnessTest do
     assert {:error, {:prolog, error}} = SWI.call(s, goal)
     assert error =~ "json_term"
     assert :sys.get_state(s).active == nil
-    assert :ok = SWI.load(s, "priv/bridge.pl")
+    assert :ok = SWI.load(s, Path.join(:code.priv_dir(:swi_elixir), "bridge.pl"))
     assert SWI.call(s, "true") == {:ok, true}
   end
 
@@ -235,7 +246,7 @@ defmodule SWI.RobustnessTest do
 
     assert SWI.call(s, goal) == {:error, {:prolog, "encode_failed"}}
     assert :sys.get_state(s).active == nil
-    assert :ok = SWI.load(s, "priv/bridge.pl")
+    assert :ok = SWI.load(s, Path.join(:code.priv_dir(:swi_elixir), "bridge.pl"))
     assert SWI.call(s, "true") == {:ok, true}
   end
 
@@ -248,8 +259,11 @@ defmodule SWI.RobustnessTest do
     script =
       "Process.flag(:trap_exit, true); Application.load(:swi_elixir); IO.inspect(SWI.start_link(backend: :nif))"
 
+    script_path = temporary("missing-nif.exs")
+    File.write!(script_path, script)
+
     {output, 0} =
-      System.cmd("elixir", ["-pa", ebin, "-e", script],
+      System.cmd("elixir", ["-pa", ebin, script_path],
         env: [{"ERL_FLAGS", "+S 1:1"}],
         stderr_to_stdout: true
       )
@@ -259,6 +273,7 @@ defmodule SWI.RobustnessTest do
 
   test "native GC cleanup finishes a slow handler and runs outer cleanup" do
     path = temporary("gc-finished")
+    quoted_path = path |> :json.encode() |> IO.iodata_to_binary()
     bridge = Path.join(:code.priv_dir(:swi_elixir), "bridge.pl")
     parent = self()
 
@@ -267,17 +282,19 @@ defmodule SWI.RobustnessTest do
         {:ok, resource} = SWI.Native.open(bridge)
 
         goal =
-          "setup_call_cleanup(true,setup_call_cleanup(true,repeat,sleep(0.1)),setup_call_cleanup(open('#{path}',write,S),write(S,done),close(S)))"
+          "setup_call_cleanup(true,setup_call_cleanup(true,repeat,sleep(0.1)),setup_call_cleanup(open(#{quoted_path},write,S),write(S,done),close(S)))"
 
-        for request <- [
-              %{op: "open", goal: goal},
-              %{op: "next", timeout: 1}
+        for {request, status} <- [
+              {%{op: "open", goal: goal}, "ok"},
+              {%{op: "next", timeout: 1}, "solution"}
             ] do
-          assert {:ok, _} =
+          assert {:ok, response} =
                    SWI.Native.request(
                      resource,
                      request |> :json.encode() |> IO.iodata_to_binary()
                    )
+
+          assert %{"status" => ^status} = :json.decode(response)
         end
 
         send(parent, :opened)
@@ -296,31 +313,26 @@ defmodule SWI.RobustnessTest do
   end
 
   defp fake_child(payload, eof \\ false) do
-    executable = temporary("child")
-    marker = executable <> ".used"
+    bridge = temporary("child.pl")
+    marker = :json.encode(bridge <> ".used") |> IO.iodata_to_binary()
+    payload = :json.encode(payload) |> IO.iodata_to_binary()
 
-    File.write!(executable, """
-    #!/usr/bin/env elixir
-    Enum.each(IO.stream(:stdio, :line), fn line ->
-      %{"op" => op} = :json.decode(line)
-      reply = case op do
-        "hello" -> %{"status" => "ready", "protocol" => 1}
-        "next" ->
-          if File.exists?(#{inspect(marker)}) do
-            %{"status" => "solution", "bindings" => %{}}
-          else
-            File.write!(#{inspect(marker)}, "used")
-            IO.binwrite(Base.decode64!("#{Base.encode64(payload)}"))
-            if #{eof}, do: System.halt(0)
-            nil
-          end
-        _ -> %{"status" => "ok"}
-      end
-      if reply, do: IO.puts(:json.encode(reply))
-    end)
+    File.write!(bridge, """
+    :- module(swi_bridge, [main/0]).
+    :- use_module(library(http/json)).
+    :- use_module(library(readutil)).
+    main :- read_line_to_string(user_input, Line),
+            (Line == end_of_file -> halt
+            ; atom_json_dict(Line, Request, []), reply(Request.op), flush_output, main).
+    reply("hello") :- !, writeln('{"status":"ready","protocol":1}').
+    reply("next") :- !,
+        (exists_file(#{marker}) -> writeln('{"status":"solution","bindings":{}}')
+        ; setup_call_cleanup(open(#{marker},write,F),write(F,used),close(F)),
+          format('~s', [#{payload}]), flush_output,
+          (#{eof} -> halt ; true)).
+    reply(_) :- writeln('{"status":"ok"}').
     """)
 
-    File.chmod!(executable, 0o755)
-    executable
+    [bridge: bridge]
   end
 end

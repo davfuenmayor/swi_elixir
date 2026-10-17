@@ -173,7 +173,7 @@ defmodule SWI.SessionTest do
 
     for operation <- [:query, :load] do
       {:os_pid, os_pid} = Port.info(:sys.get_state(s).transport, :os_pid)
-      System.cmd("kill", ["-KILL", Integer.to_string(os_pid)])
+      SWI.Runtime.kill(os_pid)
       wait_until(fn -> :sys.get_state(s).transport == nil end)
 
       if operation == :query do
@@ -194,7 +194,7 @@ defmodule SWI.SessionTest do
     {:ok, old} = SWI.Session.request(s, {:open, "repeat"})
     assert {:ok, %{}} = SWI.Session.request(s, {:next, old, 1})
     {:os_pid, pid} = Port.info(:sys.get_state(s).transport, :os_pid)
-    System.cmd("kill", ["-KILL", Integer.to_string(pid)])
+    SWI.Runtime.kill(pid)
     wait_until(fn -> :sys.get_state(s).transport == nil end)
     assert SWI.Session.request(s, {:next, old, 1}) == {:error, :session_reset}
     {:ok, current} = SWI.Session.request(s, {:open, "repeat"})

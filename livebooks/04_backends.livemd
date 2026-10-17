@@ -1,174 +1,237 @@
 # Port and NIF: measure the boundary
 
-Sources: [leanHaT](https://leancop.de/leanhat/) and
+```elixir
+Mix.install([
+  {:swi_elixir, path: Path.expand("..", __DIR__)},
+  {:kino, "== 0.19.0"}
+])
+```
+
+## Introduction
+
+Port runs SWI in a separate process; NIF embeds it in the BEAM VM. Both use
+the same loading, calling, and streaming API. This chapter measures startup
+and repeated operations, then demonstrates timeout and crash recovery.
+The theorem workloads use [leanHaT](https://leancop.de/leanhat/) and
 [nanoCoP-i-HT](https://www.leancop.de/ihat/).
 
-Port isolates SWI in a child process. NIF embeds `libswipl` in the BEAM VM.
-Both use the same query API and term encoding. Times include boundary and
-Elixir decoding costs; this is a small local comparison, not a solver ranking.
+Start with [Getting started](01_basic.livemd) if session ownership is new to
+you. Evaluate top to bottom in a runtime on a [supported platform](../README.md#platforms-and-native-bundles).
+Setup installs this checkout, its bundled SWI runtime, and Kino. Results are measured on your machine;
+this is a local boundary comparison, not a solver ranking.
+
+[All chapters](intro.livemd).
+
+* [Preliminaries](#preliminaries-scope-each-workflow)
+* [Measure startup and the first query](#measure-startup-and-the-first-query)
+* [Measure repeated work](#measure-repeated-work)
+* [Handle a search timeout](#handle-a-search-timeout)
+* [Observe Port crash recovery](#observe-port-crash-recovery)
+
+## Preliminaries: scope each workflow
+
+Each example below needs its own session. This small helper starts one and
+closes it in `after`, so a failed assertion also releases it. The callback's
+result is returned as an ordinary Elixir value.
 
 ```elixir
-project = System.fetch_env!("SWI_ELIXIR_PATH")
-Mix.install([{:swi_elixir, path: project}])
-Code.require_file(Path.join(project, "examples/showcase.exs"))
-prover_sources = [
-  {"leanhat.pl", """
-  :- module(leanhat, [prove_text/1]).
-  :- op(700, xfx, =).
-  :- include('#{Path.join(project, "vendor/leanHaT/leanhat_swi.pl")}').
-  :- include('#{Path.join(project, "vendor/leanHaT/nanocop_tptp2.pl")}').
-  prove_text(Text) :-
-      swi_bridge:read_goal(Text, leanhat, Formula, _),
-      leancop_equal(Formula, Problem), prove(Problem).
-  """},
-  {"nanocop.pl", """
-  :- module(nanocop, [prove_text/2, prove_text/3]).
-  :- op(700, xfx, =).
-  :- current_prolog_flag(occurs_check, Flag), nb_setval(nanocop_load_flag, Flag).
-  :- include('#{Path.join(project, "vendor/nanoCoP-i-HT/nanocopi20_swi.pl")}').
-  :- nb_getval(nanocop_load_flag, Flag), set_prolog_flag(occurs_check, Flag),
-     nb_delete(nanocop_load_flag).
-  :- include('#{Path.join(project, "vendor/nanoCoP-i-HT/nanocop_tptp2.pl")}').
-  :- thread_local lit/4, pathlim/0.
-  prove_text(Text, Logic) :- prove_text(Text, Logic, _).
-  prove_text(Text, Logic, Proof) :-
-      memberchk(Logic, [intu, ht]),
-      setup_call_cleanup(
-        (current_prolog_flag(occurs_check, Previous), set_prolog_flag(occurs_check, true)),
-        (swi_bridge:read_goal(Text, nanocop, Formula, _),
-         leancop_equal(Formula, Equal), leancop_intermed(Equal, Logic, Problem),
-         prove(Problem, Proof)),
-        set_prolog_flag(occurs_check, Previous)).
-  """},
-  {"prover_showcase.pl", """
-  :- module(prover_showcase, [run/7, source/3]).
-  :- use_module(library(prolog_wrap)).
-  :- use_module(leanhat).
-  :- use_module(nanocop).
-  core(leanhat, leanhat:prove(_,_,_,_), leanhat:prove/4).
-  core(nanocop, nanocop:prove(_,_,_,_,_,_,_,_,_,_), nanocop:prove/10).
-  source(Prover, File, Line) :-
-      core(Prover, Head, _), clause(Head, _, Ref),
-      clause_property(Ref, file(File)), clause_property(Ref, line_count(Line)), !.
-  run(Prover, Logic, Text, Result, Calls, Inferences, Proof) :-
-      core(Prover, Head, PI),
-      setup_call_cleanup(
-        (nb_setval(showcase_calls, 0),
-         wrap_predicate(Head, showcase, Wrapped,
-           (prover_showcase:count, call(Wrapped)))),
-        (statistics(inferences, Before),
-         (once(search(Prover, Logic, Text, Proof)) -> Result = proved
-         ; Result = exhausted, Proof = none),
-         statistics(inferences, After), Inferences is After-Before,
-         nb_getval(showcase_calls, Calls)),
-        (unwrap_predicate(PI, showcase), nb_delete(showcase_calls))).
-  count :-
-      (nb_current(showcase_calls, N) -> N1 is N+1, nb_setval(showcase_calls, N1) ; true).
-  search(leanhat, ht, Text, unavailable) :- leanhat:prove_text(Text).
-  search(nanocop, Logic, Text, Proof) :- nanocop:prove_text(Text, Logic, Proof).
-  """}
-]
-load_prolog = fn session ->
-  dir = Path.join(System.tmp_dir!(), "prover-showcase-#{:erlang.phash2(prover_sources)}")
-  File.mkdir_p!(dir)
+import ExUnit.Assertions
+project = Path.expand("..", __DIR__)
+
+with_session = fn backend, fun ->
+  {:ok, session} = SWI.start_link(backend: backend)
+
   try do
-    Enum.each(prover_sources, fn {name, source} ->
-      path = Path.join(dir, name)
-      File.write!(path, source)
-      :ok = SWI.load(session, path)
-    end)
-  after
-    File.rm_rf!(dir)
-  end
-end
-```
-
-## Startup and reuse
-
-The first NIF session initializes the VM-wide SWI runtime; later sessions reuse
-it with independent engine resources. A Port session starts a fresh OS process.
-Times are microseconds and include the first successful query. The order below
-is fixed; results are sensitive to warm caches, scheduling and prior NIF use.
-Every cell releases its sessions on failure and reevaluation.
-
-```elixir
-for backend <- [:port, :nif], attempt <- 1..3 do
-  {us, session} = :timer.tc(fn ->
-    {:ok, session} = SWI.start_link(backend: backend)
-    session
-  end)
-  try do
-    {query_us, {:ok, true}} = :timer.tc(fn -> SWI.call(session, "true") end)
-    {backend, attempt, us + query_us}
+    fun.(session)
   after
     SWI.stop(session)
   end
 end
 ```
 
-## Persistent repeated workloads
+## Measure startup and the first query
 
-The proof workloads reuse notebook 02's formula generators. These calls use
-the adapters directly, without its diagnostics or proof-term serialization.
-We request one proof and check answer counts on warmup and every measured run.
+A Port session starts an OS process each time. The first NIF session
+initializes VM-wide SWI; later sessions reuse that runtime. The measurements
+include the first successful query, in microseconds.
 
 ```elixir
+startup =
+  for backend <- [:port, :nif], attempt <- 1..3 do
+    {elapsed, {:ok, true}} =
+      :timer.tc(fn ->
+        with_session.(backend, &SWI.call(&1, "true"))
+      end)
+
+    %{backend: backend, attempt: attempt, lifecycle_us: elapsed}
+  end
+
+Kino.DataTable.new(startup, keys: [:backend, :attempt, :lifecycle_us])
+```
+
+The helper also closes the session before returning, so `lifecycle_us` includes
+cleanup. The order is fixed and caches, scheduling, and prior NIF use matter.
+Rerunning the cell does not measure a fresh VM's first NIF initialization.
+
+## Describe the workloads
+
+The tiny goal measures a small round trip. The 100-answer relation also
+exercises streaming and decoding. The two proof tasks adapt
+[Otten's tutorial](https://jens-otten.de/tutorial_tableaux19/examples/): a
+four-step function chain and four pigeons occupying three holes. Formula
+construction is visible here; solving uses the real vendored provers.
+
+```elixir
+chain_formula = "(p(a),(all X:(p(X)=>p(f(X)))))=>p(f(f(f(f(a)))))"
+
+placements =
+  for pigeon <- 1..4,
+      do: "(" <> Enum.map_join(1..3, ";", &"o#{pigeon}#{&1}") <> ")"
+
+collisions =
+  for hole <- 1..3,
+      first <- 1..4,
+      second <- 1..4,
+      first < second,
+      do: "(o#{first}#{hole},o#{second}#{hole})"
+
+pigeon_formula =
+  "(" <> Enum.join(placements, ",") <> ")=>(" <> Enum.join(collisions, ";") <> ")"
+
 quote_formula = fn formula -> formula |> :json.encode() |> IO.iodata_to_binary() end
-chain = quote_formula.(ProverShowcase.chain(4))
-pigeon = quote_formula.(ProverShowcase.pigeon(3))
+
 workloads = [
-  {"tiny", "true", 1},
+  {"Tiny goal", "true", 1},
   {"100 solutions", "between(1,100,X)", 100},
-  {"leanHaT: function chain 4", "once(leanhat:prove_text(#{chain}))", 1},
-  {"nanoCoP HT: pigeonhole", "once(nanocop:prove_text(#{pigeon},ht))", 1}
+  {"leanHaT function chain", "once(leanhat:prove_text(#{quote_formula.(chain_formula)}))",
+   1},
+  {"nanoCoP HT pigeonhole",
+   "once(nanocop:prove_text(#{quote_formula.(pigeon_formula)},ht))", 1}
 ]
-for backend <- [:port, :nif] do
-  {:ok, session} = SWI.start_link(backend: backend)
-  try do
-    :ok = load_prolog.(session)
-    for {label, goal, expected_count} <- workloads do
-      ^expected_count = Enum.count(SWI.query(session, goal, timeout: 5_000))
-      samples = for _ <- 1..7 do
-        {us, ^expected_count} = :timer.tc(fn ->
-          Enum.count(SWI.query(session, goal, timeout: 5_000))
-        end)
-        us
-      end
-      {backend, label, median_us: Enum.at(Enum.sort(samples), 3)}
-    end
-  after
-    SWI.stop(session)
-  end
-end
+
+Kino.DataTable.new(
+  for {name, goal, answers} <- workloads,
+      do: %{workload: name, goal: goal, expected_answers: answers}
+)
 ```
 
-## Timeouts and process isolation
+## Measure repeated work
 
-Timeouts are milliseconds per solution pull, excluding consumer time. SWI
-alarms interrupt Prolog computation. Port also has an external hard deadline
-with a one-second grace period; if that fires, the process is killed and the
-next request starts a fresh one. Consulted state must then be loaded again.
-NIF cannot safely kill arbitrary native code; use Port for that isolation.
-An embedded native crash or `halt/1` can terminate the entire VM. This cell
-only calls `halt/1` through Port.
+Reuse one session per backend. Load only the shared integration adapters;
+they contain no task-specific formulas. Check each workload once before
+measurement and check the answer count during every timed run.
 
 ```elixir
-for backend <- [:port, :nif] do
-  {:ok, session} = SWI.start_link(backend: backend)
-  try do
-    {:error, :timeout} = SWI.call(session, "repeat,fail", timeout: 50)
-    {:ok, true} = SWI.call(session, "true")
-    if backend == :port do
-      {:error, {:port_exit, 7}} = SWI.call(session, "halt(7)")
-      {:ok, true} = SWI.call(session, "true")
-    end
-    {backend, :timeout_and_recovery_checked}
-  after
-    SWI.stop(session)
+timings =
+  for backend <- [:port, :nif] do
+    with_session.(backend, fn session ->
+      for adapter <- ["leanhat.pl", "nanocop.pl"] do
+        :ok = SWI.load(session, Path.join([project, "examples", adapter]))
+      end
+
+      for {name, goal, expected} <- workloads do
+        assert Enum.count(SWI.query(session, goal)) == expected
+
+        samples =
+          for _ <- 1..7 do
+            {elapsed, count} = :timer.tc(fn -> Enum.count(SWI.query(session, goal)) end)
+            assert count == expected
+            elapsed
+          end
+
+        sorted = Enum.sort(samples)
+
+        %{
+          backend: backend,
+          workload: name,
+          samples: length(sorted),
+          median_us: Enum.at(sorted, div(length(sorted), 2)),
+          p95_us: Enum.at(sorted, ceil(length(sorted) * 0.95) - 1)
+        }
+      end
+    end)
   end
-end
+  |> List.flatten()
+
+Kino.DataTable.new(timings, keys: [:workload, :backend, :median_us, :p95_us, :samples])
 ```
 
-Run `mix run examples/bench.exs` for startup distributions, median/p95 latency,
-RSS snapshots and isolated failure. Notebook results are measured on your
-machine at evaluation time; no performance conclusion is hardcoded.
+Times include query parsing, proof preprocessing, transport, and Elixir
+decoding. These adapter calls do not install the kernel counters or return
+proof terms used in [the proof-search chapter](02_provers.livemd).
+Seven samples are a small illustration, not a reliable performance study.
+
+### Try it yourself
+
+Increase the sample count to 21. Predict which workload is most sensitive to
+boundary costs, then compare median and p95 again.
+
+<details>
+<summary>Hint and expected result</summary>
+
+The tiny goal does little Prolog work, so transport and scheduling can dominate.
+The measured winner is machine-dependent. Both backends must still produce
+the expected number of answers on every sample.
+
+</details>
+
+## Handle a search timeout
+
+Timeouts are milliseconds per solution pull, excluding consumer time. A
+cooperative SWI alarm timeout leaves the session usable with either backend.
+
+```elixir
+recovery =
+  for backend <- [:port, :nif] do
+    with_session.(backend, fn session ->
+      {:error, :timeout} = SWI.call(session, "repeat,fail", timeout: 50)
+      {:ok, true} = SWI.call(session, "true")
+      %{backend: backend, timed_out: true, usable_afterward: true}
+    end)
+  end
+
+Kino.DataTable.new(recovery)
+```
+
+Port also has an external transport deadline with a one-second grace period.
+If it fires, the child is killed and its database is lost. NIF cannot safely
+kill arbitrary foreign code or cleanup handlers that do not service signals.
+Use Port when a hard deadline or native crash isolation is required.
+
+## Observe Port crash recovery
+
+This example deliberately calls `halt/1` **only in a Port session**. It exits
+the disposable SWI child. The next request starts a fresh child, so a fact
+asserted before the crash is gone.
+
+```elixir
+crash_recovery =
+  with_session.(:port, fn session ->
+    {:ok, true} = SWI.call(session, "assertz(notebook_marker(ready))")
+    {:error, {:port_exit, 7}} = SWI.call(session, "halt(7)")
+    {:ok, false} = SWI.call(session, "current_predicate(notebook_marker/1)")
+    {:ok, true} = SWI.call(session, "true")
+    %{backend: :port, child_exit: 7, reconnected: true, previous_fact_retained: false}
+  end)
+
+Kino.DataTable.new([crash_recovery])
+```
+
+Calling `halt/1` through NIF would affect the entire BEAM VM. NIF sessions
+also share ordinary modules and dynamic predicates, while Port sessions have
+separate databases. These operational differences matter even though the
+query API and term representation are shared.
+
+## Session cleanup
+
+Every example in this chapter uses the scoped helper, so there is no open
+interactive session to close. Reevaluate a measurement cell directly to repeat
+that workflow. The [getting-started chapter](01_basic.livemd) shows how to
+retain one session across cells and close it explicitly.
+
+## Choose your next step
+
+* [Constraint search](03_search.livemd): control how many answers a search produces.
+* [Metagol](05_metagol.livemd) and [Aleph](06_aleph.livemd): compare programs learned through both backends.
+* `mix run examples/bench.exs`: collect larger startup and latency distributions.
+* [All chapters](intro.livemd).
