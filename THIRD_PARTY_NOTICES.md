@@ -11,7 +11,7 @@ additional rights to that material.
 
 | Material | Terms and notices |
 | --- | --- |
-| SWI-Prolog runtime, installed separately | [BSD-2-Clause and component-specific terms](https://www.swi-prolog.org/license.html). SWI-Prolog and its native dependencies are not included in the Hex package. |
+| Bundled SWI-Prolog 10.0.1 runtime | [BSD-2-Clause and component-specific notices](native/licenses/). Archives include the runtime, its Prolog libraries, LibBF (MIT), Mersenne Twister (modified BSD), zlib 1.3.2 (zlib license), and the wrapper NIF built with OTP 27 headers (Apache-2.0). GCC runtime exception and MinGW-w64 notices accompany relevant toolchain components. GMP and readline are excluded. Copyright notices, license conditions, and disclaimers accompany the archive and extracted runtime. See [build notes](MULTIPLATFORM.md). |
 | `vendor/leanHaT/` and `vendor/nanoCoP-i-HT/` | GNU GPL; upstream notices do not specify a version. Preserve the copyright notices, upstream ReadMe files, and [GPL text](vendor/COPYING). See [vendor notes](vendor/README.md). |
 | `vendor/metagol/` | [BSD-3-Clause](vendor/metagol/LICENSE), copyright (c) 2016, Metagol authors. Preserve its copyright notice, license conditions, and disclaimer. |
 | Borrowed Metagol example portions in `examples/metagol_ilp.pl`, `examples/metagol_tasks.pl`, and `livebooks/05_metagol.livemd` | The same Metagol BSD-3-Clause terms. Their origins and local adaptations are recorded in [ILP provenance](docs/ilp-provenance.md). |
@@ -19,8 +19,8 @@ additional rights to that material.
 | Borrowed Aleph task/example portions in `examples/aleph_trains.pl`, `examples/aleph_membership.pl`, and `livebooks/06_aleph.livemd` | These portions are excluded from the wrapper's MIT grant. Preserve their upstream notices and attributions; see [ILP provenance](docs/ilp-provenance.md). The wrapper's license does not resolve permissions for those portions. |
 
 The source repository includes these third-party systems and teaching examples.
-The Hex package includes only the core wrapper, its build sources, README,
-MIT license, and this notice; `vendor/`, `examples/`, and `livebooks/` are
+The Hex package includes the core wrapper, bundled native runtime and its
+notices, build sources, README, MIT license, and this notice; `vendor/`, `examples/`, and `livebooks/` are
 excluded. This separates the core library distribution from the demonstration
 systems. Distributing or combining those systems requires complying with their
 applicable terms; separate directories do not waive those requirements.

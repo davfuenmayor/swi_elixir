@@ -56,7 +56,8 @@ defmodule ILPShowcase do
   defp write_sources(nil), do: Path.join(@project, "examples")
 
   defp write_sources(sources) do
-    dir = Path.join(System.tmp_dir!(), "swi-ilp-#{:erlang.phash2(sources)}")
+    # SWI identifies loaded modules by source path, including after inline edits.
+    dir = Path.join(System.tmp_dir!(), "swi-ilp-#{System.pid()}")
     File.mkdir_p!(dir)
 
     Enum.each(sources, fn {name, source} ->

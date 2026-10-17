@@ -141,7 +141,9 @@ defmodule SWI.Session do
   end
 
   defp open_transport(%{backend: :port} = state) do
-    executable = Keyword.get(state.opts, :swipl, System.get_env("SWIPL") || "swipl")
+    override = Keyword.get(state.opts, :swipl, System.get_env("SWIPL"))
+    executable = override || SWI.Runtime.executable()
+    home_args = if override, do: [], else: ["--home=#{SWI.Runtime.home()}"]
 
     case System.find_executable(executable) do
       nil ->
@@ -154,18 +156,20 @@ defmodule SWI.Session do
             :exit_status,
             :use_stdio,
             {:line, 65_536},
-            args: [
-              "-q",
-              "--no-signals",
-              "-f",
-              "none",
-              "-s",
-              bridge(state),
-              "-g",
-              "swi_bridge:main",
-              "-t",
-              "halt"
-            ]
+            args:
+              home_args ++
+                [
+                  "-q",
+                  "--no-signals",
+                  "-f",
+                  "none",
+                  "-s",
+                  bridge(state),
+                  "-g",
+                  "swi_bridge:main",
+                  "-t",
+                  "halt"
+                ]
           ])
 
         {:ok, port}
@@ -279,7 +283,7 @@ defmodule SWI.Session do
   defp kill_port(port) do
     case Port.info(port, :os_pid) do
       {:os_pid, pid} ->
-        System.cmd("kill", ["-KILL", Integer.to_string(pid)], stderr_to_stdout: true)
+        SWI.Runtime.kill(pid)
 
       nil ->
         :ok
