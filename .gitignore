@@ -1,9 +1,14 @@
-# Build caches and extracted runtimes (native/ archives are distributable).
+# Build caches and extracted runtimes.
 /_build/
 /_native/
 /priv/swipl/
 /priv/.unpack-*/
 /deps/
+/dist/
+/tmp/
+/native/*.tar.gz
+/native/*.tar.gz.sha256
+/native/*.tar.gz.json
 /priv/*.so
 /priv/*.dylib
 /priv/*.dll

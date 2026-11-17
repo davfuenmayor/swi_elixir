@@ -19,9 +19,11 @@ additional rights to that material.
 | Borrowed Aleph task/example portions in `examples/aleph_trains.pl`, `examples/aleph_membership.pl`, and `livebooks/06_aleph.livemd` | These portions are excluded from the wrapper's MIT grant. Preserve their upstream notices and attributions; see [ILP provenance](docs/ilp-provenance.md). The wrapper's license does not resolve permissions for those portions. |
 
 The source repository includes these third-party systems and teaching examples.
-The Hex package includes the core wrapper, bundled native runtime and its
-notices, build sources, README, MIT license, and this notice; `vendor/`, `examples/`, and `livebooks/` are
-excluded. This separates the core library distribution from the demonstration
+The Hex package includes the core wrapper, build sources, release manifest,
+component notices, documentation, MIT license, and this notice. Runtime archives
+are distributed as GitHub Release assets with their component notices; they are
+not included in Git or Hex. `vendor/`, `examples/`, and `livebooks/` are excluded
+from Hex. This separates the core library distribution from the demonstration
 systems. Distributing or combining those systems requires complying with their
 applicable terms; separate directories do not waive those requirements.
 

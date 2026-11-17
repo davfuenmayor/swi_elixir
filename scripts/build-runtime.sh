@@ -12,10 +12,19 @@ case "$host" in
 esac
 target=${SWI_TARGET:-$default_target}
 repo=$(cd "${1:-../swipl-devel}" && pwd -P)
-mkdir -p _native native/licenses
-root=${SWI_BUILD_ROOT:-$(mktemp -d "$PWD/_native/runtime.XXXXXX")}
+cache=${SWI_BUILD_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/swi-elixir}
+mkdir -p "$cache"
+root=${SWI_BUILD_ROOT:-$(mktemp -d "$cache/runtime.XXXXXX")}
 mkdir -p "$root"
 root=$(cd "$root" && pwd -P)
+licenses="$root/licenses"
+mkdir -p "$licenses"
+cp -a native/licenses/. "$licenses/"
+if [ "$target" = windows-x86_64 ]; then
+  for directory in /mingw64/share/licenses/{gcc-libs,mingw-w64-crt,mingw-w64-headers,winpthreads}; do
+    [ ! -d "$directory" ] || cp -R "$directory" "$licenses/"
+  done
+fi
 cleanup() {
   if [ -z "${SWI_BUILD_ROOT:-}" ]; then
     git -C "$repo" worktree remove --force "$root/source" 2>/dev/null || true
@@ -29,8 +38,8 @@ fetch() {
 }
 
 if [ ! -d "$root/source" ]; then
-  git -C "$repo" worktree add --detach "$root/source" e58621a91ab7dd530e1e8185ed518f63d851c414
-  git -C "$root/source" submodule update --init packages/clib packages/http packages/sgml packages/json
+  git -c core.autocrlf=false -C "$repo" worktree add --detach "$root/source" e58621a91ab7dd530e1e8185ed518f63d851c414
+  git -c core.autocrlf=false -C "$root/source" submodule update --init packages/clib packages/http packages/sgml packages/json
 fi
 # The bridge uses HTTP's JSON API, without its optional TLS client.
 sed -i.bak 's/set(SWIPL_PKG_DEPS_http clib sgml json ssl)/set(SWIPL_PKG_DEPS_http clib sgml json)/' "$root/source/cmake/PackageSelection.cmake"
@@ -39,7 +48,7 @@ sed -i.bak '/^clib_plugin(crypt$/,/PL_LIBS crypt.pl)/d' "$root/source/packages/c
 flags=()
 cmake_flags=()
 compiler=${CC:-cc}
-strip_command=strip
+strip_command="strip"
 strip_flags=()
 nif_ext=so
 case "$target" in
@@ -74,7 +83,7 @@ case "$target" in
         -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++-posix
         -DCMAKE_RC_COMPILER=x86_64-w64-mingw32-windres -DCMAKE_CROSSCOMPILING_EMULATOR=wine)
       export WINEDEBUG=-all WINEARCH=win64
-      export WINEPREFIX=${WINEPREFIX:-$PWD/_native/wine}
+      export WINEPREFIX=${WINEPREFIX:-$cache/wine}
       wineboot -u
     fi
     ;;
@@ -144,7 +153,7 @@ cp "$include/erl_int_sizes_config.h" "$root/otp/"
 if [ "$target" = windows-x86_64 ]; then
   sed -i.bak 's/#define SIZEOF_LONG 8/#define SIZEOF_LONG 4/' "$root/otp/erl_int_sizes_config.h"
 fi
-sed -n '/%CopyrightBegin%/,/%CopyrightEnd%/p' "$root/otp/"*.h > native/licenses/Erlang-NOTICES.txt
+sed -n '/%CopyrightBegin%/,/%CopyrightEnd%/p' "$root/otp/"*.h > "$licenses/Erlang-NOTICES.txt"
 make -B CC="$compiler" ERL_INCLUDE="$root/otp" SWI_HOME="$home" SWI_LIBDIR="$libdir" \
   TARGET="$home/bin/swi_nif.$nif_ext" NIF_EXT="$nif_ext" CFLAGS="-O2 -Wall -Wextra -Werror ${flags[*]}"
 
@@ -152,6 +161,8 @@ case "$target" in
   linux-*)
     patchelf --set-rpath "\$ORIGIN/../lib/$arch" "$home/bin/swipl"
     for library in "$libdir"/*.so*; do
+      # ELF loader token, deliberately not expanded by the shell.
+      # shellcheck disable=SC2016
       [ -L "$library" ] || patchelf --set-rpath '$ORIGIN' "$library"
     done
     ;;
@@ -175,10 +186,10 @@ case "$target" in
     done
     ;;
 esac
-elixir --erl '+S 1:1' scripts/runtime-notices.exs "$root/source" native/licenses/SWI-Prolog-NOTICES.txt
-cp "$root/source/LICENSE" native/licenses/SWI-Prolog-LICENSE.txt
-cp "$root/zlib/LICENSE" native/licenses/zlib-LICENSE.txt
-cp -a native/licenses "$home/"
+elixir --erl '+S 1:1' scripts/runtime-notices.exs "$root/source" "$licenses/SWI-Prolog-NOTICES.txt"
+cp "$root/source/LICENSE" "$licenses/SWI-Prolog-LICENSE.txt"
+cp "$root/zlib/LICENSE" "$licenses/zlib-LICENSE.txt"
+cp -a "$licenses" "$home/"
 for binary in "$home"/bin/swipl* "$home/bin/swi_nif.$nif_ext" "$libdir"/*; do
   [ -L "$binary" ] && continue
   case "$binary" in *.so*|*.dylib|*.dll|*/swipl|*.exe) ;; *) continue ;; esac
@@ -197,6 +208,14 @@ if [[ "$target" == macos-* ]]; then
     [ -L "$binary" ] || codesign --force --sign - "$binary"
   done
 fi
-archive="native/swi-10.0.1-$target.tar.gz"
+version=$(elixir --erl '+S 1:1' -e 'Mix.start(); Code.require_file("mix.exs"); IO.write(Mix.Project.config()[:version])')
+artifacts=${SWI_ARTIFACT_DIR:-$cache/artifacts}
+mkdir -p "$artifacts"
+artifacts=$(cd "$artifacts" && pwd -P)
+archive="$artifacts/swi_elixir-$version-$target.tar.gz"
 tar -czf "$archive" -C "$root/stage" swipl
 elixir --erl '+S 1:1' -e '[file] = System.argv(); hash = :crypto.hash(:sha256, File.read!(file)) |> Base.encode16(case: :lower); File.write!(file <> ".sha256", hash <> "\n")' "$archive"
+export SWI_TARGET="$target" SWI_BUILD_CC="$compiler"
+elixir --erl '+S 1:1' scripts/runtime-metadata.exs "$archive" "$home"
+if command -v cygpath >/dev/null 2>&1; then archive=$(cygpath -w "$archive"); fi
+echo "SWI_NATIVE_ARCHIVE=$archive"

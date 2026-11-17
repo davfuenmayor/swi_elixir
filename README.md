@@ -23,23 +23,17 @@ SWI.stop(prolog)
 
 ## Platforms and native bundles
 
-Requires **Elixir 1.18+ and OTP 27+**, both 64-bit. Mix selects a bundle for the
-runtime's OS and CPU, checks its SHA-256, and unpacks SWI-Prolog 10.0.1 and the
-NIF into the application. Both backends use it automatically, including in
-Livebook. Available bundles need no separate SWI installation or compiler.
+Requires **Elixir 1.18+ and OTP 27+**, both 64-bit. Runtime archives live in
+versioned GitHub Releases, not Git or Hex. Mix selects the running BEAM's OS/CPU,
+downloads an archive into an external cache, verifies its committed manifest hash,
+and installs SWI-Prolog 10.0.1 with its matching NIF. Both backends share this
+installation, including in Livebook. The first download requires internet;
+verified cached archives can be reused offline.
 
-| Platform | Minimum / current status |
-| --- | --- |
-| Linux x86-64 | glibc 2.31+; bundled and tested natively |
-| Linux ARM64 | glibc 2.31+; bundle built; validation in progress |
-| Windows x86-64 | Windows 10+; bundled; full suite passes under Wine; native Windows validation pending |
-| macOS Intel | macOS 12+; source-build path prepared; bundle and native validation pending |
-| macOS Apple Silicon | macOS 12+; source-build path prepared; bundle and native validation pending |
-
-macOS bundles cannot yet be advertised as working out of the box: a macOS
-build/test runner is needed. Alpine/musl, 32-bit runtimes, and Windows ARM64
-are excluded. Native libraries must match the architecture of the running
-BEAM, including when it runs under CPU emulation.
+Native CI covers Linux glibc x86-64/ARM64, Windows x86-64 and macOS Intel/Apple
+Silicon. Build baselines are glibc 2.31, Windows 10 and macOS 12. Alpine/musl,
+32-bit runtimes and Windows ARM64 are excluded. For source development or an
+unpublished version, use the explicit local-bundle option below.
 
 ```sh
 mix compile
@@ -47,7 +41,7 @@ mix compile
 
 The runtime uses LibBF and static zlib; GMP, readline, TLS, and GUI extensions
 are excluded. See [MULTIPLATFORM.md](MULTIPLATFORM.md) for build and test
-procedures, recorded results, and remaining work; component licenses are in
+procedures and platform requirements; component licenses are in
 [native/](native/README.md). Restart the BEAM/Livebook runtime after changing
 bundles, since an initialized embedded SWI remains loaded for the VM lifetime.
 
@@ -65,12 +59,13 @@ an **MSYS2 MINGW64** shell with the MinGW-w64 toolchain and Erlang/Elixir on
 ```sh
 git clone --branch V10.0.1 https://github.com/SWI-Prolog/swipl-devel.git ../swipl-devel
 scripts/build-runtime.sh ../swipl-devel
+export SWI_ELIXIR_BUNDLE=/absolute/path/printed/as/SWI_NATIVE_ARCHIVE
 mix clean
 mix test
 ```
 
-The script detects the native target and writes `native/swi-10.0.1-<target>.tar.gz`
-and its `.sha256` file. Subsequent compilation uses that bundle automatically.
+The script writes `swi_elixir-<version>-<target>.tar.gz`, its `.sha256` and build
+`.json` outside the checkout. Set `SWI_ELIXIR_BUNDLE` to its printed absolute path.
 Optional `CFLAGS` allow local CPU tuning: `-O3 -mcpu=native` on Apple Silicon,
 or `-O3 -march=native` on Intel/AMD. Keep CPU-tuned bundles on matching CPUs.
 See [build and test instructions](MULTIPLATFORM.md) for prerequisites and validation.
@@ -78,8 +73,10 @@ See [build and test instructions](MULTIPLATFORM.md) for prerequisites and valida
 To use a bundle supplied from elsewhere, set **`SWI_ELIXIR_BUNDLE`** to its
 absolute native path before `mix compile` or starting Livebook, and keep its
 matching `.sha256` alongside it. It contains the SWI runtime, libraries, and
-matching NIF; target and checksum checks still apply. Normal bundled installs
-need no environment variables.
+matching NIF; target, payload and checksum checks still apply. Published release
+installs need no override. `SWI_CACHE_DIR` relocates the download cache, and
+`SWI_RELEASE_BASE_URL` selects an HTTPS mirror. See [MAINTAINING.md](MAINTAINING.md)
+for artifact review and draft-release publication.
 
 For a separately installed SWI executable, the Port backend also accepts
 `SWI.start_link(backend: :port, swipl: "/path/to/swipl")` or `SWIPL`.

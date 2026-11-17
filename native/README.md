@@ -1,21 +1,20 @@
-# Bundled runtimes
+# Native runtime distribution
 
-This directory contains relocatable SWI-Prolog 10.0.1 runtimes and their matching
-NIFs, named `swi-10.0.1-<target>.tar.gz`. Each archive has a `.sha256` file;
-Mix verifies both the checksum and embedded target before extraction. Available
-bundles need no separate SWI installation or native compilation.
+This directory contains the reviewed release manifest and redistribution notices.
+Runtime archives, libraries and executables are excluded from Git and Hex.
 
-See [MULTIPLATFORM.md](../MULTIPLATFORM.md) for platform status, build
-prerequisites, native and cross-build commands, local bundle overrides, test
-procedures, and remaining validation work. macOS archives are not yet built.
+`manifest.json` records a release tag, native source fingerprint, and one archive
+filename, SHA-256 and build record per approved target. Native CI builds and tests
+the artifacts; maintainers review them and publish versioned release assets.
 
-The runtime uses LibBF and statically linked zlib 1.3.2. Optional dependencies
-such as readline, TLS, and GUI extensions are excluded. It is a compact runtime
-for the wrapper and notebooks rather than a full desktop SWI distribution.
-Component terms and notices are in [licenses/](licenses/) and accompany the
-extracted runtime. Windows also includes applicable MinGW/GCC runtime notices.
+Mix downloads the selected archive into an external SHA-256-keyed cache. It
+verifies the committed digest, embedded target and required files before
+installation. Each complete `swipl/` archive contains the executable, boot image,
+matching NIF, libraries and [component notices](licenses/). Both backends share it.
 
-For local C shim development, run `mix compile`, then `make -B` on Unix or
-`make -B NIF_EXT=dll` in Windows MINGW64. This builds against the extracted
-runtime using your installed OTP headers. Rebuild the archive before
-distributing a shim change.
+For development, run `scripts/build-runtime.sh`, then set `SWI_ELIXIR_BUNDLE`
+to the printed absolute archive path, keeping its `.sha256` sidecar. This is an
+explicit trusted override, not an automatic fallback.
+
+See [MULTIPLATFORM.md](../MULTIPLATFORM.md) for builds and validation and
+[MAINTAINING.md](../MAINTAINING.md) for release preparation.

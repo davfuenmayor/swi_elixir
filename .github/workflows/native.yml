@@ -1,0 +1,91 @@
+name: Native SWI builds
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - {runner: ubuntu-22.04, container: 'ubuntu:20.04', target: linux-x86_64, otp: '27', elixir: '1.18'}
+          - {runner: ubuntu-22.04-arm, container: 'ubuntu:20.04', target: linux-aarch64, otp: '27', elixir: '1.18'}
+          - {runner: windows-2022, target: windows-x86_64}
+          - {runner: macos-15-intel, target: macos-x86_64}
+          - {runner: macos-15, target: macos-aarch64}
+    runs-on: ${{ matrix.platform.runner }}
+    container: ${{ matrix.platform.container || '' }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      BUILD_JOBS: '3'
+      SWI_TARGET: ${{ matrix.platform.target }}
+    steps:
+      - name: Linux prerequisites (glibc 2.31 build baseline)
+        if: runner.os == 'Linux'
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y ca-certificates git curl build-essential cmake ninja-build patchelf unzip libncurses6 libssl-dev
+          # setup-beam reads ImageOS, which otherwise describes the host runner.
+          echo 'ImageOS=ubuntu20' >> "$GITHUB_ENV"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: erlef/setup-beam@0f75c29430f34bb5af4cce5e3b7f6a8860fca236
+        with:
+          otp-version: ${{ matrix.platform.otp || '29' }}
+          elixir-version: ${{ matrix.platform.elixir || '1.20' }}
+      - name: macOS prerequisites
+        if: runner.os == 'macOS'
+        run: brew install cmake ninja
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e
+        if: runner.os == 'Windows'
+        with:
+          msystem: MINGW64
+          path-type: inherit
+          update: true
+          install: >-
+            git curl tar make mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja mingw-w64-x86_64-binutils
+      - name: Fetch pinned upstream
+        run: git clone --branch V10.0.1 https://github.com/SWI-Prolog/swipl-devel.git "$RUNNER_TEMP/swipl-devel"
+      - name: Build Unix runtime
+        if: runner.os != 'Windows'
+        run: |
+          export SWI_ARTIFACT_DIR="$RUNNER_TEMP/artifacts"
+          scripts/build-runtime.sh "$RUNNER_TEMP/swipl-devel" | tee "$RUNNER_TEMP/swi-build.log"
+          archive=$(sed -n 's/^SWI_NATIVE_ARCHIVE=//p' "$RUNNER_TEMP/swi-build.log")
+          test -f "$archive"
+          echo "SWI_ELIXIR_BUNDLE=$archive" >> "$GITHUB_ENV"
+      - name: Build Windows runtime
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          export SWI_ARTIFACT_DIR="$(cygpath -u "$RUNNER_TEMP")/artifacts"
+          scripts/build-runtime.sh "$(cygpath -u "$RUNNER_TEMP")/swipl-devel" | tee "$(cygpath -u "$RUNNER_TEMP")/swi-build.log"
+          archive=$(sed -n 's/^SWI_NATIVE_ARCHIVE=//p' "$(cygpath -u "$RUNNER_TEMP")/swi-build.log")
+          test -n "$archive"
+          echo "SWI_ELIXIR_BUNDLE=$archive" >> "$GITHUB_ENV"
+      - name: Test both backends and source package
+        run: |
+          mix local.hex --force
+          mix test
+          mix run scripts/check_native.exs
+          mix hex.build -o "$RUNNER_TEMP/swi.tar"
+          elixir scripts/check_package.exs "$RUNNER_TEMP/swi.tar"
+          elixir scripts/check_packaged_install.exs "$RUNNER_TEMP/swi.tar"
+          git diff --exit-code
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-${{ matrix.platform.target }}
+          path: ${{ runner.temp }}/artifacts/*
+          if-no-files-found: error
