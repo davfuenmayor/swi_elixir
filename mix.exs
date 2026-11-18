@@ -124,8 +124,7 @@ defmodule Mix.Tasks.Compile.SwiNative do
         end
       end
 
-    # Windows may copy priv instead of symlinking it before custom compilers run.
-    Mix.Project.build_structure()
+    # Mix prepares priv before running compilers. A copy needs the new runtime.
     app_priv = Path.join(Mix.Project.app_path(), "priv")
 
     unless File.read(Path.join(app_priv, "swipl/.bundle")) == {:ok, expected} and
