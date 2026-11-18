@@ -112,14 +112,16 @@ defmodule SWI.RobustnessTest do
     exited = temporary("exit.pl")
     File.write!(exited, ":- initialization(halt(0)).\n")
     assert {:error, {:startup, {:error, reason}}} = SWI.start_link(bridge: exited)
-    assert reason in [:port_down, {:port_exit, 0}]
+    # Windows can report a broken pipe when the child exits before reading hello.
+    interrupted = [:port_down, {:port_exit, :epipe}]
+    assert reason in [{:port_exit, 0} | interrupted]
     assert {:error, :invalid_cleanup_timeout} = SWI.start_link(cleanup_timeout: 0)
     assert {:error, :invalid_cleanup_timeout} = SWI.start_link(cleanup_timeout: 1.5)
 
     bridge = temporary("broken.pl")
     File.write!(bridge, ":- initialization(halt(19)).\n")
     assert {:error, {:startup, {:error, reason}}} = SWI.start_link(bridge: bridge)
-    assert reason in [:port_down, {:port_exit, 19}]
+    assert reason in [{:port_exit, 19} | interrupted]
 
     # A library import error must fail readiness, even if other predicates loaded.
     File.write!(
@@ -128,7 +130,7 @@ defmodule SWI.RobustnessTest do
     )
 
     assert {:error, {:startup, {:error, reason}}} = SWI.start_link(bridge: bridge)
-    assert reason in [:port_down, {:port_exit, 20}]
+    assert reason in [{:port_exit, 20} | interrupted]
   end
 
   test "readiness is bounded and failed children are killed" do
@@ -168,7 +170,8 @@ defmodule SWI.RobustnessTest do
 
     executable = temporary("invalid-executable")
     File.write!(executable, "invalid executable\n")
-    File.chmod!(executable, 0o755)
+    # On Unix, let the fixture reach the OS launcher so it can reject its format.
+    if :os.type() != {:win32, :nt}, do: File.chmod!(executable, 0o700)
 
     case SWI.start_link(swipl: executable) do
       {:error, {:spawn_failed, message}} -> assert is_binary(message)

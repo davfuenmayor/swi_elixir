@@ -12,7 +12,6 @@ defmodule SWI.RuntimeTest do
 
     if :os.type() != {:win32, :nt} do
       File.cp!(System.find_executable("kill"), Path.join(bin, "kill"))
-      File.chmod!(Path.join(bin, "kill"), 0o755)
     end
 
     script = """

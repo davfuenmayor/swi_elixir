@@ -64,8 +64,8 @@ mix run scripts/check_native.exs
 
 CI additionally runs `mix test` on each target, including both backends and
 relocated execution without system SWI. The smoke check exercises bignums, CLPFD
-and exceptions. Installer tests check downloads, digest rejection, cache repair,
-offline reuse, source mismatch and missing targets.
+and exceptions. Installer tests check archive integrity, cache recovery, offline
+reuse, and rejection of stale or unsafe release inputs.
 
 ```sh
 mix hex.build -o /tmp/swi.tar

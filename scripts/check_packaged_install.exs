@@ -20,7 +20,6 @@ try do
 
   if :os.type() != {:win32, :nt} do
     File.cp!(System.find_executable("kill"), Path.join(tools, "kill"))
-    File.chmod!(Path.join(tools, "kill"), 0o755)
   end
 
   code = """

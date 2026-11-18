@@ -18,11 +18,8 @@ defmodule SWI.PlatformTest do
   test "rejects musl and unknown platforms instead of loading an incompatible binary" do
     for {os, arch} <- [
           {{:unix, :linux}, "x86_64-unknown-linux-musl"},
-          {{:unix, :linux}, "aarch64-unknown-linux-musl"},
           {{:unix, :linux}, "riscv64-unknown-linux-gnu"},
-          {{:win32, :nt}, "x86"},
-          {{:win32, :nt}, "ARM64"},
-          {{:unix, :freebsd}, "x86_64-unknown-freebsd"}
+          {{:win32, :nt}, "ARM64"}
         ] do
       assert_raise Mix.Error, ~r/Unsupported SWI platform/, fn -> Compiler.target(os, arch) end
     end

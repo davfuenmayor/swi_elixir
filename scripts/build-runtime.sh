@@ -94,24 +94,25 @@ if [ -n "${SWI_BUILD_SYSROOT:-}" ]; then
   cmake_flags+=("-DCMAKE_SYSROOT=$SWI_BUILD_SYSROOT")
 fi
 read -r -a user_flags <<< "${CFLAGS:-}"
-flags+=("${user_flags[@]}")
+# Bash 3.2 treats empty arrays as unset under nounset. Expand them conditionally.
+flags+=(${user_flags[@]+"${user_flags[@]}"})
 
 fetch https://zlib.net/fossils/zlib-1.3.2.tar.gz "$root/zlib.tar.gz" bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16
 mkdir -p "$root/zlib"
 tar -xzf "$root/zlib.tar.gz" -C "$root/zlib" --strip-components=1
 (
   cd "$root/zlib"
-  CC="$compiler" CFLAGS="-O2 -fPIC ${flags[*]}" ./configure --static --prefix="$root/zlib-prefix"
+  CC="$compiler" CFLAGS="-O2 -fPIC ${flags[*]-}" ./configure --static --prefix="$root/zlib-prefix"
   make -j "${BUILD_JOBS:-4}"
   make install
 )
 
 cmake -S "$root/source" -B "$root/build" -G Ninja \
-  "${cmake_flags[@]}" \
+  ${cmake_flags[@]+"${cmake_flags[@]}"} \
   -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$root/install" \
-  -DCMAKE_C_FLAGS="${flags[*]}" -DCMAKE_CXX_FLAGS="${flags[*]}" \
+  -DCMAKE_C_FLAGS="${flags[*]-}" -DCMAKE_CXX_FLAGS="${flags[*]-}" \
   -DUSE_GMP=OFF -DUSE_LIBBF=ON -DUSE_TCMALLOC=OFF \
-  -DINSTALL_DOCUMENTATION=OFF -DBUILD_TESTING=OFF \
+  -DINSTALL_DOCUMENTATION=OFF -DINSTALL_QLF=OFF -DBUILD_TESTING=OFF \
   '-DSWIPL_PACKAGE_LIST=clib;http' -DZLIB_ROOT="$root/zlib-prefix" \
   -DZLIB_LIBRARY="$root/zlib-prefix/lib/libz.a" -DZLIB_INCLUDE_DIR="$root/zlib-prefix/include" \
   -DZLIB_USE_STATIC_LIBS=ON -DCMAKE_DISABLE_FIND_PACKAGE_Curses=ON \
@@ -155,7 +156,7 @@ if [ "$target" = windows-x86_64 ]; then
 fi
 sed -n '/%CopyrightBegin%/,/%CopyrightEnd%/p' "$root/otp/"*.h > "$licenses/Erlang-NOTICES.txt"
 make -B CC="$compiler" ERL_INCLUDE="$root/otp" SWI_HOME="$home" SWI_LIBDIR="$libdir" \
-  TARGET="$home/bin/swi_nif.$nif_ext" NIF_EXT="$nif_ext" CFLAGS="-O2 -Wall -Wextra -Werror ${flags[*]}"
+  TARGET="$home/bin/swi_nif.$nif_ext" NIF_EXT="$nif_ext" CFLAGS="-O2 -Wall -Wextra -Werror ${flags[*]-}"
 
 case "$target" in
   linux-*)
@@ -193,7 +194,7 @@ cp -a "$licenses" "$home/"
 for binary in "$home"/bin/swipl* "$home/bin/swi_nif.$nif_ext" "$libdir"/*; do
   [ -L "$binary" ] && continue
   case "$binary" in *.so*|*.dylib|*.dll|*/swipl|*.exe) ;; *) continue ;; esac
-  "$strip_command" "${strip_flags[@]}" "$binary"
+  "$strip_command" ${strip_flags[@]+"${strip_flags[@]}"} "$binary"
   if [[ "$target" == linux-* ]]; then
     required=$(readelf --version-info "$binary" | sed -n 's/.*Name: GLIBC_\([0-9.]*\).*/\1/p' | sort -V | tail -n 1)
     if [ "$(printf '%s\n' "$required" 2.31 | sort -V | tail -n 1)" != 2.31 ]; then

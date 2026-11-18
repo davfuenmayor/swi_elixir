@@ -35,10 +35,17 @@ jobs:
           apt-get update
           apt-get install -y ca-certificates git curl build-essential cmake ninja-build patchelf unzip libncurses6 libssl-dev
           # setup-beam reads ImageOS, which otherwise describes the host runner.
-          echo 'ImageOS=ubuntu20' >> "$GITHUB_ENV"
+          {
+            echo 'ImageOS=ubuntu20'
+            echo 'LANG=C.UTF-8'
+            echo 'LC_ALL=C.UTF-8'
+          } >> "$GITHUB_ENV"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
+      - name: Trust the mounted checkout
+        if: runner.os == 'Linux'
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - uses: erlef/setup-beam@0f75c29430f34bb5af4cce5e3b7f6a8860fca236
         with:
           otp-version: ${{ matrix.platform.otp || '29' }}

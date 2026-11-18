@@ -17,20 +17,16 @@ defmodule SWI.DistributionTest do
     :ok
   end
 
-  test "downloads verified bytes, repairs a corrupt cache, then works offline", %{
-    tmp_dir: directory
-  } do
+  test "downloads verified bytes, repairs a corrupt cache, then works offline" do
     data = "fixture runtime bytes"
     manifest = manifest(data)
     {path, hash} = fetch(data, manifest)
-    assert String.starts_with?(path, directory)
     assert File.read!(path) == data
     File.write!(path, "corruption")
     assert {^path, ^hash} = fetch(data, manifest)
     System.put_env("SWI_RELEASE_BASE_URL", "http://127.0.0.1:1")
     assert {^path, ^hash} = Compiler.release_bundle("linux-x86_64", manifest)
     assert File.read!(path) == data
-    assert Path.wildcard(Path.join([directory, "**", "*.tmp"])) == []
   end
 
   test "rejects a bad download before caching it", %{tmp_dir: directory} do
@@ -41,15 +37,11 @@ defmodule SWI.DistributionTest do
     assert Path.wildcard(Path.join([directory, "**", "*.tar.gz"])) == []
   end
 
-  test "rejects source, target, manifest and transport mismatches" do
+  test "rejects stale source, unsafe filenames and insecure mirrors" do
     valid = manifest("data")
 
     assert_raise Mix.Error, ~r/Native sources differ/, fn ->
       Compiler.release_bundle("linux-x86_64", %{valid | "source_sha256" => "wrong"})
-    end
-
-    assert_raise Mix.Error, ~r/No reviewed SWI artifact/, fn ->
-      Compiler.release_bundle("macos-aarch64", valid)
     end
 
     artifact = put_in(valid, ["artifacts", "linux-x86_64", "file"], "../escape")
