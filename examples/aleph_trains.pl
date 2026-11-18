@@ -1,6 +1,6 @@
 % Adapted from friguzzi/aleph, prolog/examples/train.pl.
 % Aleph: Ashwin Srinivasan; SWI port: Fabrizio Riguzzi and Paolo N. Giubelli.
-% See docs/ilp-provenance.md and the upstream academic-use notice.
+% See the academic-use notice in vendor/aleph/aleph.pl.
 :- module(aleph_trains, []).
 % Simple illustration of the use of Aleph on
 %       Michalski's trains problem

@@ -1,4 +1,3 @@
-% Adapted from Metagol examples; see docs/ilp-provenance.md.
 % Copyright (c) 2016, Metagol authors; BSD-3-Clause (vendor/metagol/LICENSE).
 :- module(metagol_tasks, [primitives/2, training/3, tests/2]).
 

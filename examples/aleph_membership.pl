@@ -1,6 +1,6 @@
 % Adapted from friguzzi/aleph, prolog/examples/recursion.pl.
 % Aleph: Ashwin Srinivasan; SWI port: Fabrizio Riguzzi and Paolo N. Giubelli.
-% See docs/ilp-provenance.md and the upstream academic-use notice.
+% See the academic-use notice in vendor/aleph/aleph.pl.
 :- module(aleph_membership, []).
 % Simple illustration of the learning of recursive predicates
 %       in Aleph

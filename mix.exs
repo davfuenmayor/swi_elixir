@@ -19,14 +19,12 @@ defmodule SWIElixir.MixProject do
           "lib",
           "c_src",
           "native/manifest.json",
-          "native/README.md",
           "native/licenses",
           "priv/bridge.pl",
           "scripts/build-runtime.sh",
           "scripts/runtime-notices.exs",
           "scripts/runtime-metadata.exs",
           "scripts/check_native.exs",
-          "MAINTAINING.md",
           ".gitattributes",
           "Makefile",
           "mix.exs",
@@ -230,7 +228,7 @@ defmodule Mix.Tasks.Compile.SwiNative do
 
         error ->
           Mix.raise(
-            "Cannot download SWI artifact #{url}: #{inspect(error)}. Publish matching release assets or set SWI_ELIXIR_BUNDLE; see MAINTAINING.md"
+            "Cannot download SWI artifact #{url}: #{inspect(error)}. See MULTIPLATFORM.md or set SWI_ELIXIR_BUNDLE."
           )
       end
 
@@ -280,7 +278,7 @@ defmodule Mix.Tasks.Compile.SwiNative do
       {{:unix, :darwin}, "x86_64", false} -> "macos-x86_64"
       {{:unix, :darwin}, cpu, false} when cpu in ["aarch64", "arm64"] -> "macos-aarch64"
       {{:win32, :nt}, cpu, false} when cpu in ["AMD64", "amd64", "x86_64"] -> "windows-x86_64"
-      _ -> Mix.raise("Unsupported SWI platform: #{inspect(os)} / #{arch}. See native/README.md.")
+      _ -> Mix.raise("Unsupported SWI platform: #{inspect(os)} / #{arch}. See MULTIPLATFORM.md.")
     end
   end
 end

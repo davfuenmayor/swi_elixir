@@ -1,86 +1,44 @@
-# Multiplatform builds and validation
-
-Requires 64-bit Elixir 1.18+ and OTP 27+. Git and Hex contain sources, the artifact
-manifest and notices. Release archives contain SWI and its matching C NIF. Ports
-and NIF share the same installation.
-
-## CI matrix
-
-| Target | Native CI environment | Build requirements |
-| --- | --- | --- |
-| Linux x86-64 | Ubuntu 20.04 container on an x86-64 runner | C/C++, CMake, Ninja, make, patchelf, git, curl |
-| Linux ARM64 | Ubuntu 20.04 container on an ARM64 runner | Same; native ARM64 toolchain |
-| Windows x86-64 | Windows 2022, MSYS2 MINGW64 | MinGW-w64 GCC/G++, CMake, Ninja, make, binutils, git, curl |
-| macOS Intel | Intel macOS 15 | Xcode Command Line Tools, CMake, Ninja, make, git, curl |
-| macOS Apple Silicon | ARM64 macOS 15 | Same; native ARM64 toolchain |
-
-Jobs run independently without fail-fast cancellation. CI uploads candidate
-artifacts but has no publication permission. Automatic installation requires an
-approved manifest entry and a matching public release asset; otherwise use an
-explicit local bundle when developing an unpublished version.
-
-Linux enforces a maximum glibc symbol requirement of 2.31. macOS requests
-deployment target 12; Windows targets Windows 10+. These settings do not replace
-execution on the minimum supported OS. Musl, 32-bit runtimes and Windows ARM64
-are outside the matrix.
+# Native builds and releases
 
 ## Build locally
 
-Install the tools above plus Elixir/OTP. On macOS, use `brew install cmake ninja`;
-on Windows, use an MSYS2 MINGW64 shell with Windows Elixir/OTP on PATH. Linux
-builds need glibc 2.31 or a suitable development sysroot.
+Install a C toolchain, CMake, Ninja, Git, curl, make and Elixir/OTP. Linux also
+needs `patchelf` and glibc 2.31 or a matching sysroot. Use Xcode Command Line Tools
+on macOS and MSYS2 MINGW64 on Windows. The macOS deployment target is 12.
 
 ```sh
 git clone --branch V10.0.1 https://github.com/SWI-Prolog/swipl-devel.git ../swipl-devel
 scripts/build-runtime.sh ../swipl-devel
-export SWI_ELIXIR_BUNDLE=/absolute/path/printed/as/SWI_NATIVE_ARCHIVE
-mix compile
-mix run scripts/check_native.exs
+export SWI_ELIXIR_BUNDLE=/absolute/path/to/the/printed/archive.tar.gz
+mix test
 ```
 
-The builder pins SWI, zlib and OTP NIF headers. The compact runtime uses LibBF
-and static zlib, without optional TLS/GUI/readline extensions. Relative library
-paths and component notices travel with the runtime. Windows clears SWI's unwind
-bit from exit codes; macOS modifies load paths and strips before ad-hoc signing.
+Keep the `.sha256` sidecar. `SWI_ARTIFACT_DIR` sets the build output directory.
+`SWI_CACHE_DIR` sets the download cache. Restart the BEAM after replacing a NIF.
+For a system SWI executable, set `SWIPL` or pass `swipl:` to a Port session.
 
-Outputs are `swi_elixir-<wrapper-version>-<target>.tar.gz`, `.sha256` and `.json`.
-Builds and generated notices stay outside the checkout. Override locations with
-`SWI_BUILD_CACHE`, `SWI_BUILD_ROOT` and `SWI_ARTIFACT_DIR`. `BUILD_JOBS` limits
-parallelism. `SWI_BUILD_SYSROOT` selects a Linux sysroot; `SWI_TARGET` enables
-supported cross-builds. Emulated execution does not replace native CI.
+## Release
 
-Private CPU-tuned builds may use `CFLAGS='-O3 -mcpu=native'` on Apple Silicon
-or `CFLAGS='-O3 -march=native'` on Intel/AMD. Keep those on matching CPUs and
-measure performance and compatibility before using them elsewhere.
+1. Set the wrapper version in `mix.exs`. Run native CI and collect the five
+   archives, checksums and build records from one run. CI installs the package
+   and runs both backends per target. Linux x86-64 also runs the full suite.
+2. Generate the manifest. Commit it and push the matching tag.
 
-## Validate
+   ```sh
+   elixir scripts/prepare_native_manifest.exs /path/to/artifacts v0.1.0 > native/manifest.json
+   ```
 
-Fast installer and target checks:
+3. Create and publish the reviewed draft release. Use the tag matching `mix.exs`.
 
-```sh
-mix test test/distribution_test.exs test/platform_test.exs
-mix run scripts/check_native.exs
-```
+   ```sh
+   SWI_ARTIFACT_DIR=/path/to/artifacts elixir scripts/publish_native.exs
+   ```
 
-CI installs the source package and runs the same Port and NIF smoke check on
-each target. The check exercises bignums, CLPFD and exceptions. The Linux x86-64
-job also runs the full `mix test` suite, including query timeouts, fault injection,
-and relocated execution without system SWI.
+4. On each target, install from an empty cache with `SWI_ELIXIR_BUNDLE` unset.
+   Check both backends, then publish Hex. Runtime archives stay out of Git and Hex.
 
-```sh
-mix hex.build -o /tmp/swi.tar
-elixir scripts/check_package.exs /tmp/swi.tar
-elixir scripts/check_packaged_install.exs /tmp/swi.tar
-```
-
-The package guard rejects binary/archive payloads. The consumer check extracts
-the package into a path containing spaces and installs it with `Mix.install/1`,
-the same entry point used by Livebook. CI keeps the unpacked source and Mix
-cache in the runner's temporary directory. For a manual run, you can remove
-the printed check directory after Elixir exits.
-CI uses its explicitly built bundle. Public delivery must also be tested without
-that override, with an empty cache, on every target. Evaluate Livebooks on native
-runtimes before advertising notebook support; lesson content is unchanged.
-
-See [MAINTAINING.md](MAINTAINING.md) for artifact review, immutable draft releases,
-anonymous download checks and Hex publication order.
+   ```sh
+   mix hex.build -o swi.tar
+   elixir scripts/check_package.exs swi.tar
+   elixir scripts/check_packaged_install.exs swi.tar
+   ```

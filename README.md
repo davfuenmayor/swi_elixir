@@ -2,340 +2,50 @@
 
 [![Native SWI builds](https://github.com/davfuenmayor/swi_elixir/actions/workflows/native.yml/badge.svg?branch=main)](https://github.com/davfuenmayor/swi_elixir/actions/workflows/native.yml?query=branch%3Amain)
 
-A small Elixir bridge to SWI-Prolog, with a persistent **Port** backend and an
-embedded **NIF** backend. Elixir owns sessions and consumes lazy solution
-streams; SWI handles parsing, unification, backtracking and proof search.
-There are no Hex dependencies, typespecs, or alternate logic syntax.
-
-Original wrapper code and documentation are licensed under [MIT](LICENSE),
-including its warranty disclaimer and limitation of liability. Third-party
-systems and borrowed example portions retain their upstream terms; see
-[license scope and third-party notices](THIRD_PARTY_NOTICES.md). The Hex package
-contains the core wrapper and build sources, excluding vendors and teaching
-examples.
+Run SWI-Prolog from Elixir through a Port or a NIF. Both use the same API.
 
 ```elixir
-{:ok, prolog} = SWI.start_link(backend: :port) # or :nif
-SWI.query(prolog, "member(X, [a,b,c])") |> Enum.to_list()
-# [%{"X" => {:atom, "a"}}, %{"X" => {:atom, "b"}}, %{"X" => {:atom, "c"}}]
-SWI.call(prolog, "1 + 1 =:= 2") # {:ok, true}
-SWI.call(prolog, "fail")        # {:ok, false}
-SWI.stop(prolog)
+{:ok, swi} = SWI.start_link(backend: :port)
+SWI.query(swi, "member(X, [a,b])") |> Enum.to_list()
+# [%{"X" => {:atom, "a"}}, %{"X" => {:atom, "b"}}]
+SWI.call(swi, "2 + 2 =:= 4") # {:ok, true}
+SWI.stop(swi)
 ```
 
 ## Platforms and native bundles
 
-Requires **Elixir 1.18+ and OTP 27+**, both 64-bit. Runtime archives live in
-versioned GitHub Releases, not Git or Hex. Mix selects the running BEAM's OS/CPU,
-downloads an archive into an external cache, verifies its committed manifest hash,
-and installs SWI-Prolog 10.0.1 with its matching NIF. Both backends share this
-installation, including in Livebook. The first download requires internet;
-verified cached archives can be reused offline.
+Use 64-bit Elixir 1.18+ and OTP 27+. For a published release, Mix downloads and
+verifies SWI and its matching NIF. You need no compiler or system SWI install.
 
-Native CI covers Linux glibc x86-64/ARM64, Windows x86-64 and macOS Intel/Apple
-Silicon. Build baselines are glibc 2.31, Windows 10 and macOS 12. Alpine/musl,
-32-bit runtimes and Windows ARM64 are excluded. For source development or an
-unpublished version, use the explicit local-bundle option below.
+Targets are Linux glibc x86-64 and ARM64, Windows x86-64, and macOS Intel and
+Apple Silicon. See [builds, local bundles and releases](MULTIPLATFORM.md).
 
-```sh
-mix compile
-```
+## Sessions
 
-The runtime uses LibBF and static zlib; GMP, readline, TLS, and GUI extensions
-are excluded. See [MULTIPLATFORM.md](MULTIPLATFORM.md) for build and test
-procedures and platform requirements; component licenses are in
-[native/](native/README.md). Restart the BEAM/Livebook runtime after changing
-bundles, since an initialized embedded SWI remains loaded for the VM lifetime.
+`SWI.load/3` consults a file. Pass one UTF-8 goal to `SWI.query/3` for a lazy stream
+of bindings or `SWI.call/3` for a Boolean. Query errors raise `SWI.Error` during
+enumeration. `call/3` returns `{:ok, boolean}` or `{:error, reason}`.
 
-### Build or bring your own bundle
+A session supports one active query. Exhaustion or `Enum.take/2` closes it. Use
+separate sessions for parallel searches. `timeout:` is in milliseconds and
+limits each pull (default 5,000). Timeouts do not roll back side effects.
 
-Windows and macOS users can build SWI and the NIF together against their local
-toolchain. This permits CPU tuning and checking compatibility on the actual
-machine; performance and reliability improvements should be measured and tested.
-
-Install a C toolchain, git, curl, make, CMake, Ninja, and Elixir/OTP. On macOS,
-use Xcode Command Line Tools plus `brew install cmake ninja`. On Windows, use
-an **MSYS2 MINGW64** shell with the MinGW-w64 toolchain and Erlang/Elixir on
-`PATH`. From this checkout:
-
-```sh
-git clone --branch V10.0.1 https://github.com/SWI-Prolog/swipl-devel.git ../swipl-devel
-scripts/build-runtime.sh ../swipl-devel
-export SWI_ELIXIR_BUNDLE=/absolute/path/printed/as/SWI_NATIVE_ARCHIVE
-mix clean
-mix test
-```
-
-The script writes `swi_elixir-<version>-<target>.tar.gz`, its `.sha256` and build
-`.json` outside the checkout. Set `SWI_ELIXIR_BUNDLE` to its printed absolute path.
-Optional `CFLAGS` allow local CPU tuning: `-O3 -mcpu=native` on Apple Silicon,
-or `-O3 -march=native` on Intel/AMD. Keep CPU-tuned bundles on matching CPUs.
-See [build and test instructions](MULTIPLATFORM.md) for prerequisites and validation.
-
-To use a bundle supplied from elsewhere, set **`SWI_ELIXIR_BUNDLE`** to its
-absolute native path before `mix compile` or starting Livebook, and keep its
-matching `.sha256` alongside it. It contains the SWI runtime, libraries, and
-matching NIF; target, payload and checksum checks still apply. Published release
-installs need no override. `SWI_CACHE_DIR` relocates the download cache, and
-`SWI_RELEASE_BASE_URL` selects an HTTPS mirror. See [MAINTAINING.md](MAINTAINING.md)
-for artifact review and draft-release publication.
-
-For a separately installed SWI executable, the Port backend also accepts
-`SWI.start_link(backend: :port, swipl: "/path/to/swipl")` or `SWIPL`.
-The NIF uses the selected complete bundle.
-
-## Queries, loading, and ownership
-```elixir
-{:ok, prolog} = SWI.start_link(backend: :nif)
-:ok = SWI.load(prolog, "examples/family.pl")
-SWI.query(prolog, "family:ancestor(ada, Who)") |> Enum.to_list()
-# Who = grace; alan; emmy
-SWI.query(prolog, "between(1, inf, N)") |> Enum.take(10)
-SWI.call(prolog, "repeat, fail", timeout: 50) # {:error, :timeout}
-SWI.call(prolog, "throw(oops)") # {:error, {:prolog, "oops"}}
-SWI.stop(prolog)
-```
-
-`query/3` returns a lazy Elixir enumerable of binding maps, including `%{}` for a
-variable-free success and no elements for failure. It opens the query when
-enumerated. `call/3` consumes one solution and returns `{:ok, boolean}` or
-`{:error, reason}`. `load/3` consults a file and returns `:ok` or an error.
-Goal text and paths must be UTF-8; invalid text raises `ArgumentError` in the
-caller without touching the session. Queries contain exactly one goal, with an
-optional final period and trailing comments. Extra terms are rejected before
-execution. Failed initialization or directives make `load/3` return an error;
-ordinary warnings remain nonfatal. A failed load can leave partial code and
-side effects. Streams raise `SWI.Error` on Prolog or
-transport errors, carrying the same `reason` returned by `call/3`.
-
-Each session supports one active enumeration. Overlapping queries or loads
-return `:busy`. The enumerating process owns the cursor; monitor cleanup closes
-it if that process dies. Exhaustion, exceptions and `Enum.take/2` close it too.
-Cleanup failures on early halt raise `SWI.Error`; `call/3` returns the error
-instead of a successful Boolean. `stop/1` closes the active cursor and returns
-`:ok` or a cleanup error. Closing and stopping are one server operation; later
-queued requests exit when that session terminates. When an Elixir
-consumer throws or raises, that original failure takes precedence and any
-cleanup failure is logged. Cleanup failures after consumer death are logged;
-native GC fallback failures are reported to stderr.
-
-A suspended `Enumerable.reduce/3` continuation retains ownership until resumed
-or halted; explicitly halt continuations you keep. Use separate sessions for
-parallel searches. Variable IDs are local to a single answer.
-
-`:timeout` defaults to 5,000 milliseconds and must be positive. It bounds each
-solution search, excluding time spent consuming an answer. Consults also accept
-a timeout. Ordinary SWI exceptions and alarm timeouts leave the session usable.
-They do not roll back Prolog side effects. Elixir calls use an infinite GenServer
-timeout so they cannot abandon a native call still executing in SWI.
-
-Session option `:cleanup_timeout` is a positive integer in milliseconds
-(default 1,000). For Port sessions, closing a cursor gets this budget plus one
-second of transport grace, separately from the query's `:timeout`. This applies
-to early halt, consumer death, explicit stop, and graceful supervisor shutdown.
-If cleanup does not finish, the child is killed and its database is lost.
-
-SWI runs `setup_call_cleanup/3` cleanup handlers with asynchronous signals
-blocked. A SWI alarm therefore cannot bound even a pure Prolog loop in such a
-handler. Native close, shutdown, and GC cleanup must wait for these handlers;
-`:cleanup_timeout` does not enforce a native cleanup deadline. Use the Port
-backend when cleanup requires a hard deadline. This limitation also applies to
-cleanup triggered during a query timeout.
-
-Startup checks protocol readiness and the JSON/time libraries before returning
-a session. Port readiness has a two-second deadline. Startup errors include
-`{:swipl_not_found, executable}`, `{:spawn_failed, diagnostic}`,
-`{:startup, {:error, reason}}`, and `:nif_unavailable`. Bridge diagnostics are
-also printed by SWI to stderr. `:bridge` can select a custom bridge file.
-Invalid JSON, reply statuses, or encoded bindings return `:invalid_reply` and
-retire the transport. A failed native bridge request likewise retires its
-resource. The next request reconnects; callers must reload lost session state.
-Native modules and ordinary predicates remain shared across native sessions.
-
-For OTP supervision:
-
-```elixir
-children = [{SWI, backend: :port, name: MyProlog}]
-{:ok, supervisor} = Supervisor.start_link(children, strategy: :one_for_one)
-SWI.call(MyProlog, "true")
-```
-
-Use `Supervisor.child_spec/2` with distinct IDs when starting multiple sessions.
-On an external SWI crash or hard timeout, the Elixir session stays alive.
-A request witnessing the failure returns its transport error, and a later
-request reconnects. If the child dies while idle, the next query or load returns
-`{:error, :session_reset}` once, before a subsequent request reconnects. An
-existing suspended stream also reports that reset on its next pull. This
-notice does not replay the rejected operation or reload source files. Coordinate
-restoration with other users of the session: Port loaded files and asserted
-state are lost; native ordinary predicates remain VM-wide after resource
-retirement. Restarting the Elixir child under supervision creates a fresh
-session. Monitor its concrete PID and reload state after `:DOWN`; a registered
-name identifies whichever replacement is currently registered and carries no
-database-generation guarantee.
-
-## Values
+Port isolates crashes and can kill a worker that misses its deadline. Reload
+Prolog state after a reset. NIF sessions share ordinary predicates and modules
+inside the BEAM. Native cleanup can block on a Prolog cleanup handler.
 
 | Prolog | Elixir |
 | --- | --- |
-| `hello` | `{:atom, "hello"}` |
-| integer, float | integer, float |
-| `"hello"` | `"hello"` |
-| `[a,1]`, `[]` | `[{:atom, "a"}, 1]`, `[]` |
-| `f(a,1)` | `{:compound, "f", [{:atom, "a"}, 1]}` |
-| unbound variable | `{:var, integer_id}` |
-| `[a\|tail]` | `{:cons, {:atom, "a"}, {:atom, "tail"}}` |
-| cyclic term, dict, rational, other extended value | `{:prolog, rendered_text}` |
+| Atom | `{:atom, name}` |
+| Number, string, proper list | Number, string, list |
+| Compound | `{:compound, name, args}` |
+| Unbound variable | `{:var, id}` |
+| Improper list | `{:cons, head, tail}` |
+| Other terms, including cycles | `{:prolog, text}` |
 
-Binding names and atom names are binaries; arbitrary queries never intern BEAM
-atoms. Shared unbound variables retain their identity across bindings and
-compound arguments. Attributed-variable constraints are not serialized; query
-or reify them explicitly in Prolog. Extended/cyclic values are an opaque text
-fallback, not a round-trip AST. Inputs remain ordinary Prolog goal strings;
-SWI parses them. Do not interpolate untrusted input or execute untrusted goals.
+## Livebooks
 
-## Port versus NIF
+Open [the index](livebooks/intro.livemd) from the checkout. Lessons cover queries,
+search, the backends, theorem proving, Metagol and Aleph.
 
-Both backends use `priv/bridge.pl`, with an SWI engine retaining the query's
-choice points. The deliberately small protocol has open/next/close/load
-operations and tagged JSON values. OTP's built-in JSON handles decoding.
-The NIF is a thin FLI call into that same bridge; it still uses serialization,
-so lower latency is a measurement question rather than a promise.
-
-Port runs the bridge in one persistent child. Ordinary goal output goes to
-stderr; a separate output stream carries protocol replies. Its main thread
-reads requests while a worker thread searches. EOF on the protocol input kills
-the disposable runtime, including when the BEAM session is forcibly killed
-mid-search. A hard transport
-deadline (query timeout plus one second) kills the process even if its goal
-catches the SWI alarm. This cannot guarantee Prolog cleanup handlers run.
-
-NIF owns an FLI engine resource per session and executes initialization,
-queries and explicit cleanup on dirty CPU schedulers. SWI engines attach and
-detach between calls as dirty scheduler threads change. Concurrent sessions
-have independent stacks and cursors; **SWI's modules and ordinary dynamic
-predicate database are VM-wide**, not isolated. Use `thread_local/1` for query
-scratch data. Source loading/reloading mutates shared code and should be
-coordinated before concurrent searches. Query engines are children of session
-engines: query-local flags and non-backtrackable variables do not persist
-between queries. The query API promises persistent loaded code/database,
-not interactive top-level thread state.
-
-Native explicit close resumes and cuts suspended queries so cleanup exceptions
-can propagate, then destroys their parent engine. A GC
-fallback performs the same work on a short-lived native reaper thread, keeping
-cleanup off normal BEAM schedulers. Native admission is bounded to **64 wrapper-owned engine
-slots** per VM, including live resources, GC reclamations, and quarantined
-engines. Exhaustion returns `{:error, :native_capacity}` from session startup.
-Explicit close releases a slot only after confirmed engine destruction; failed
-destruction retains the handle for retry. GC thread-creation or destruction
-failure retains its slot in quarantine, prints a diagnostic, and reduces
-capacity until VM restart. Blocked cleanup likewise occupies its slot. This
-bounds reclamation work without pretending to interrupt native cleanup.
-`SWI.Native.stats/0` provides internal engine/reaper/quarantine counts for
-troubleshooting. Fault-injection switches are compiled only into isolated test
-libraries; the normal NIF has no runtime fault switch. SWI and the NIF shared
-library remain loaded for the VM lifetime; native hot upgrades/unloading are
-not supported. SWI initializes with signal handling disabled to preserve
-BEAM's signal handlers, and the wrapper never calls `PL_cleanup()`.
-
-NIF timeouts use SWI alarms, which cannot forcibly stop foreign code that does
-not service signals, or a goal that deliberately catches the alarm. A native
-crash, `halt/1`, or process-wide Prolog operation affects the entire BEAM VM.
-Choose Port when crash isolation or hard cancellation is required. Normal
-BEAM scheduler responsiveness is tested with a real CPU search and with a
-single ordinary scheduler.
-
-The design follows SWI's official [FLI documentation](https://www.swi-prolog.org/pldoc/man?section=foreign),
-[native engine rules](https://www.swi-prolog.org/pldoc/man?section=foreignthread),
-and [Prolog engine interface](https://www.swi-prolog.org/pldoc/man?section=engines).
-
-## Provers, learners, and Livebooks
-
-`mix run examples/provers.exs` runs both [leanHaT](https://leancop.de/leanhat/)
-and [nanoCoP-i-HT](https://www.leancop.de/ihat/) through both backends. Unmodified
-SWI sources, copyright notices, archive hashes and adapter details are in
-[vendor/README.md](vendor/README.md). Their upstream GPL licensing is preserved.
-
-```elixir
-:ok = SWI.load(prolog, "examples/leanhat.pl")
-:ok = SWI.load(prolog, "examples/nanocop.pl")
-SWI.call(prolog, ~s|leanhat:prove_text("p => p")|)
-SWI.call(prolog, ~s|nanocop:prove_text("~p ; ~ ~p", ht)|)
-SWI.call(prolog, ~s|nanocop:prove_text("~p ; ~ ~p", intu)|)
-```
-
-`call/3` stops at one proof. To enumerate a goal directly, bear in mind that
-alternative proofs may be unbounded. `false` reports search exhaustion;
-timeout never establishes non-validity. nanoCoP's HT extension is incomplete.
-
-The [showcase provenance ledger](docs/prover-showcases.md) attributes formulas
-to Jens Otten's TABLEAUX 2019 tutorial and Otten/Schaub's HT paper, and records
-notation changes, expected results and diagnostic limitations.
-`nanocop:prove_text/3` optionally returns the upstream connection proof;
-leanHaT's adapter exposes success only.
-
-Start at the [Livebook introduction](livebooks/intro.livemd), which links the
-six standalone lessons. Install Livebook once if
-needed (the lessons were checked with version 0.19.9):
-
-```sh
-mix escript.install hex livebook 0.19.9 --force
-```
-
-Launch it from the checkout:
-
-```sh
-~/.mix/escripts/livebook server livebooks/intro.livemd
-```
-
-1. [Basic Prolog](livebooks/01_basic.livemd): unification, recursion, backend equality.
-2. [Theorem proving](livebooks/02_provers.livemd): tutorial function chains and pigeonholes,
-   HT versus intuitionistic logic, live kernel counters and nanoCoP proof terms.
-3. [Search](livebooks/03_search.livemd): N-queens, lazy finite prefixes, an infinite generator.
-4. [Backend comparison](livebooks/04_backends.livemd): startup, reuse, proving, timeouts and crashes.
-5. [Metagol](livebooks/05_metagol.livemd): predicate invention, recursive ancestry,
-   higher-order nested-list transformation and clause-budget experiments.
-6. [Aleph](livebooks/06_aleph.livemd): Michalski’s trains, bottom clauses,
-   mode declarations, memorization versus generalization, and recursive membership.
-
-Each lesson installs this checkout using its location and pins Kino 0.19.0
-for tables and diagrams. Use a local Livebook runtime and evaluate from top
-to bottom; the first dependency installation needs network access. Task source
-and data are inline, with shared adapters for the vendored systems. No
-project-path environment variable is required. Prediction exercises include
-hints, and the first lesson explains session cleanup and reevaluation.
-
-The ILP lessons execute the real upstream learners through both backends and
-check learned programs on training and project-authored diagnostic cases.
-[ILP provenance](docs/ilp-provenance.md) records authors, pinned commits, source
-hashes, licenses and adaptations. Metagol is BSD-3-Clause; Aleph’s source carries
-an academic-use notice and asks commercial users to contact its author.
-
-## Validation and benchmarking
-
-```sh
-mix format --check-formatted
-mix compile --warnings-as-errors
-mix test
-ERL_FLAGS='+S 1:1' mix test test/swi_test.exs
-mix run examples/provers.exs
-mix run examples/bench.exs
-ERL_FLAGS='+S 1:1' mix test test/ilp_test.exs
-elixir scripts/check_livebooks.exs
-```
-
-Tests cover binding/variable identity, recursion, large replies, exceptions,
-alarm timeouts, hard Port timeouts, restart, independent native searches,
-cleanup on early halt/consumer death/resource GC, scheduler responsiveness,
-and ordinary/prover backend equivalence. Notebook code cells can be
-validated twice in one VM without the UI using `scripts/check_livebooks.exs`;
-the runner evaluates all six notebooks twice in one VM. This does not verify
-Livebook rendering or interactive reruns.
-
-[Benchmark output](docs/benchmark.txt) records a local run with startup,
-persistent tiny/symbolic queries, 100 solutions, quantified calls to each
-prover, median/p95 latency, timeout behavior, and Linux RSS snapshots.
-RSS is a runtime/process snapshot, not a per-query allocation measurement;
-BEAM allocator retention and VM-wide native state affect it. The benchmark
-uses first proofs for theorem goals. No backend is assumed to be faster.
+[MIT](LICENSE). See [third-party notices](THIRD_PARTY_NOTICES.md).
