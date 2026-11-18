@@ -1,5 +1,8 @@
 #define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE /* Expose dladdr and Dl_info in dlfcn.h. */
+#endif
 #ifdef _WIN32
 /* OTP 27's allocation annotations describe functions, not Windows callbacks. */
 #include <erl_drv_nif.h>
