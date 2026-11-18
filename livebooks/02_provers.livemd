@@ -1,4 +1,4 @@
-# Real proof search with leanHaT and nanoCoP
+# Proof search
 
 ```elixir
 Mix.install([
@@ -6,250 +6,1146 @@ Mix.install([
   {:kino, "== 0.19.0"}
 ])
 
-project = Path.join(Mix.install_project_dir(), "deps/swi_elixir")
+quote_text = fn text -> :json.encode(text) |> IO.iodata_to_binary() end
 
-Kino.nothing()
-```
+leancop = ~S"""
+:- module(leancop, [prove_text/1]).
+% Restore '=' precedence before reloading the core and matrix translator.
+:- op(700, xfx, =).
+:- include('leancop21_swi.pl').
+:- include('leancop_tptp2.pl').
+:- thread_local lit/4, pathlim/0.
 
-## Introduction
+prove_text(Text) :-
+    swi_bridge:read_goal(Text, leancop, F, _),
+    leancop_equal(F, Problem),
+    call_cleanup(once(prove(Problem, _)),
+                 (retractall(lit(_,_,_,_)), retractall(pathlim))).
+"""
 
-Run two actual theorem provers on quantified formulas, inspect their search
-activity, and compare two logics. The provers are [leanHaT](https://leancop.de/leanhat/)
-and [nanoCoP-i-HT](https://www.leancop.de/ihat/).
-
-Start with [Getting started](01_basic.livemd) if the wrapper is new to you.
-Choose **Evaluate all** in Standalone. [All chapters and setup help](intro.livemd).
-
-* [Preliminaries](#preliminaries-start-the-provers)
-* [Follow a quantified function chain](#follow-a-quantified-function-chain)
-* [Prove a finite pigeonhole principle](#prove-a-finite-pigeonhole-principle)
-* [Compare two logics](#compare-two-logics)
-* [Inspect a returned proof](#inspect-a-returned-proof)
-
-## Preliminaries: start the provers
-
-This cell loads both provers and starts a session. Leave `backend` at `:port`
-for a separate SWI process, or choose `:nif` to run inside Livebook's BEAM.
-The goals and calls are the same either way.
-
-```elixir
-import ExUnit.Assertions
-backend = :port
-
-vendor = fn path ->
-  :json.encode(Path.join([project, "vendor", path])) |> IO.iodata_to_binary()
-end
-```
-
-### How we ask the provers
-
-These two adapters parse the formula in the prover's syntax and call its
-search predicate. The engines themselves are vendored libraries. nanoCoP
-uses an occurs check so unifying a variable with a term containing that
-variable fails instead of creating a cycle.
-
-```elixir
-leanhat = ~s"""
+leanhat = ~S"""
 :- module(leanhat, [prove_text/1]).
 % The translator changes '=' precedence; restore it before reloading core.
 :- op(700, xfx, =).
-:- include(#{vendor.("leanHaT/leanhat_swi.pl")}).
-:- include(#{vendor.("leanHaT/nanocop_tptp2.pl")}).
+:- include('leanhat_swi.pl').
+:- include('nanocop_tptp2.pl').
 
 prove_text(Text) :-
     swi_bridge:read_goal(Text, leanhat, F, _), leancop_equal(F, Problem), prove(Problem).
 """
-```
 
-```elixir
-nanocop = ~s"""
-:- module(nanocop, [prove_text/2, prove_text/3]).
-% The translator changes '=' precedence. Restore it before reconsulting core.
-:- op(700, xfx, =).
-% Keep the upstream load-time directive from changing the caller's flag.
-:- current_prolog_flag(occurs_check, Flag), nb_setval(nanocop_load_flag, Flag).
-:- include(#{vendor.("nanoCoP-i-HT/nanocopi20_swi.pl")}).
-:- nb_getval(nanocop_load_flag, Flag), set_prolog_flag(occurs_check, Flag),
-   nb_delete(nanocop_load_flag).
-:- include(#{vendor.("nanoCoP-i-HT/nanocop_tptp2.pl")}).
-% Upstream uses a dynamic scratch database. Each query engine owns its copy.
-:- thread_local lit/4, pathlim/0.
+ileancop = ~S"""
+:- module(ileancop, [prove_text/1]).
+:- include('ileancop_swi.pl').
+:- thread_local pathlim/0.
 
-prove_text(Text, Logic) :- prove_text(Text, Logic, _).
-
-prove_text(Text, Logic, Proof) :-
-    memberchk(Logic, [intu, ht]),
-    setup_call_cleanup(
-      (current_prolog_flag(occurs_check, Previous), set_prolog_flag(occurs_check, true)),
-      (swi_bridge:read_goal(Text, nanocop, F, _),
-       leancop_equal(F, Equal), leancop_intermed(Equal, Logic, Problem), prove(Problem, Proof)),
-      set_prolog_flag(occurs_check, Previous)).
+prove_text(Text) :-
+    swi_bridge:read_goal(Text, ileancop, Formula, _),
+    make_matrix_intu(Formula, Matrix),
+    call_cleanup(once(prove(Matrix, 1)), retractall(pathlim)).
 """
-```
 
-The next program wraps each recursive search predicate with a counter.
-Read the three parts of `setup_call_cleanup/3` as install, search, and
-restore. The counter observes search without choosing its branches.
-
-```elixir
 diagnostics = ~S"""
-:- module(prover_showcase, [run/7, source/3]).
+:- module(prover_showcase, [run/5]).
 :- use_module(library(prolog_wrap)).
-:- use_module(leanhat).
-:- use_module(nanocop).
+:- use_module(leancop, []).
+:- use_module(leanhat, []).
+:- use_module(ileancop, []).
 
+core(leancop, leancop:prove(_,_,_,_,_,_), leancop:prove/6).
 core(leanhat, leanhat:prove(_,_,_,_), leanhat:prove/4).
-core(nanocop, nanocop:prove(_,_,_,_,_,_,_,_,_,_), nanocop:prove/10).
-
-source(Prover, File, Line) :-
-    core(Prover, Head, _), clause(Head, _, Ref),
-    clause_property(Ref, file(File)), clause_property(Ref, line_count(Line)), !.
+core(ileancop, ileancop:prove(_,_,_,_,_), ileancop:prove/5).
 
 % Run serially: wrappers modify predicates shared by all embedded engines.
 % The counter itself belongs to the calling query engine.
-run(Prover, Logic, Text, Result, Calls, Inferences, Proof) :-
+run(Prover, Logic, Text, Result, Calls) :-
     core(Prover, Head, PI),
     setup_call_cleanup(
       (nb_setval(showcase_calls, 0),
        wrap_predicate(Head, showcase, Wrapped,
          (prover_showcase:count, call(Wrapped)))),
-      (statistics(inferences, Before),
-       (once(search(Prover, Logic, Text, Proof)) -> Result = proved
-       ; Result = exhausted, Proof = none),
-       statistics(inferences, After), Inferences is After-Before,
+      ((once(search(Prover, Logic, Text)) -> Result = proved ; Result = exhausted),
        nb_getval(showcase_calls, Calls)),
       (unwrap_predicate(PI, showcase), nb_delete(showcase_calls))).
 
 count :-
     (nb_current(showcase_calls, N) -> N1 is N+1, nb_setval(showcase_calls, N1) ; true).
 
-search(leanhat, ht, Text, unavailable) :- leanhat:prove_text(Text).
-search(nanocop, Logic, Text, Proof) :- nanocop:prove_text(Text, Logic, Proof).
+search(leancop, classical, Text) :- leancop:prove_text(Text).
+search(leanhat, ht, Text) :- leanhat:prove_text(Text).
+search(ileancop, intu, Text) :- ileancop:prove_text(Text).
 """
-```
 
-```elixir
-dir = Path.join(System.tmp_dir!(), "swi-livebook-provers-#{System.pid()}")
-File.mkdir_p!(dir)
+# Upstream Prolog sources. The adapters and examples are defined separately.
+prover_sources = %{
+  "leancop21_swi.pl" => ~S"""
+  %% File: leancop21_swi.pl  -  Version: 2.1  -  Date: 30 Aug 2008
+  %%
+  %%         "Make everything as simple as possible, but not simpler."
+  %%                                                 [Albert Einstein]
+  %%
+  %% Purpose: leanCoP: A Lean Connection Prover for Classical Logic
+  %%
+  %% Author:  Jens Otten
+  %% Web:     www.leancop.de
+  %%
+  %% Usage: prove(M,P).    % where M is a set of clauses and P is
+  %%                       %  the returned connection proof
+  %%                       %  e.g. M=[[q(a)],[-p],[p,-q(X)]]
+  %%                       %  and  P=[[q(a)],[[-(q(a)),p],[[-(p)]]]]
+  %%        prove(F,P).    % where F is a first-order formula and
+  %%                       %  P is the returned connection proof
+  %%                       %  e.g. F=((p,all X:(p=>q(X)))=>all Y:q(Y))
+  %%                       %  and  P=[[q(a)],[[-(q(a)),p],[[-(p)]]]]
+  %%        prove2(F,S,P). % where F is a formula, S is a subset of
+  %%                       %  [nodef,def,conj,reo(I),scut,cut,comp(J)]
+  %%                       %  (with numbers I,J) defining attributes
+  %%                       %  and P is the returned connection proof
+  %%
+  %% Copyright: (c) 1999-2008 by Jens Otten
+  %% License:   GNU General Public License
 
-for {file, source} <- [
-      {"leanhat.pl", leanhat},
-      {"nanocop.pl", nanocop},
-      {"prover_showcase.pl", diagnostics}
-    ] do
-  File.write!(Path.join(dir, file), source)
+
+  :- [def_mm].  % load program for clausal form translation
+  :- dynamic(pathlim/0), dynamic(lit/4).
+
+
+  %%% prove matrix M / formula F
+
+  prove(F,Proof) :- prove2(F,[cut,comp(7)],Proof).
+
+  prove2(F,Set,Proof) :-
+      (F=[_|_] -> M=F ; make_matrix(F,M,Set)),
+      retractall(lit(_,_,_,_)), (member([-(#)],M) -> S=conj ; S=pos),
+      assert_clauses(M,S), prove(1,Set,Proof).
+
+  prove(PathLim,Set,Proof) :-
+      \+member(scut,Set) -> prove([-(#)],[],PathLim,[],Set,[Proof]) ;
+      lit(#,_,C,_) -> prove(C,[-(#)],PathLim,[],Set,Proof1),
+      Proof=[C|Proof1].
+  prove(PathLim,Set,Proof) :-
+      member(comp(Limit),Set), PathLim=Limit -> prove(1,[],Proof) ;
+      (member(comp(_),Set);retract(pathlim)) ->
+      PathLim1 is PathLim+1, prove(PathLim1,Set,Proof).
+
+  %%% leanCoP core prover
+
+  prove([],_,_,_,_,[]).
+
+  prove([Lit|Cla],Path,PathLim,Lem,Set,Proof) :-
+      Proof=[[[NegLit|Cla1]|Proof1]|Proof2],
+      \+ (member(LitC,[Lit|Cla]), member(LitP,Path), LitC==LitP),
+      (-NegLit=Lit;-Lit=NegLit) ->
+         ( member(LitL,Lem), Lit==LitL, Cla1=[], Proof1=[]
+           ;
+           member(NegL,Path), unify_with_occurs_check(NegL,NegLit),
+           Cla1=[], Proof1=[]
+           ;
+           lit(NegLit,NegL,Cla1,Grnd1),
+           unify_with_occurs_check(NegL,NegLit),
+           ( Grnd1=g -> true ; length(Path,K), K<PathLim -> true ;
+             \+ pathlim -> assert(pathlim), fail ),
+           prove(Cla1,[Lit|Path],PathLim,Lem,Set,Proof1)
+         ),
+         ( member(cut,Set) -> ! ; true ),
+         prove(Cla,Path,PathLim,[Lit|Lem],Set,Proof2).
+
+  %%% write clauses into Prolog's database
+
+  assert_clauses([],_).
+  assert_clauses([C|M],Set) :-
+      (Set\=conj, \+member(-_,C) -> C1=[#|C] ; C1=C),
+      (ground(C) -> G=g ; G=n), assert_clauses2(C1,[],G),
+      assert_clauses(M,Set).
+
+  assert_clauses2([],_,_).
+  assert_clauses2([L|C],C1,G) :-
+      assert_renvar([L],[L2]), append(C1,C,C2), append(C1,[L],C3),
+      assert(lit(L2,L,C2,G)), assert_clauses2(C,C3,G).
+
+  assert_renvar([],[]).
+  assert_renvar([F|FunL],[F1|FunL1]) :-
+      ( var(F) -> true ; F=..[Fu|Arg], assert_renvar(Arg,Arg1),
+        F1=..[Fu|Arg1] ), assert_renvar(FunL,FunL1).
+  """,
+  "def_mm.pl" => ~S"""
+  %% File: def_mm.pl  -  Version: 1.01  -  Date: 07 June 2007
+  %%
+  %% Purpose: Transform first-order formulae into clausal form
+  %%
+  %% Author:  Jens Otten
+  %% Web:     www.leancop.de
+  %%
+  %% Usage:   make_matrix(F,M,S).  % where F is a first-order formula,
+  %%                               % S is a list of settings, and M is
+  %%                               % the (definitional) clausal form
+  %%
+  %% Example: make_matrix(ex Y: (all X: ((p(Y) => p(X))) ),Matrix,[]).
+  %%          Matrix = [[-(p(X1))], [p(1 ^ [X1])]]
+  %%
+  %% Copyright: (c) 1999-2007 by Jens Otten
+  %% License:   GNU General Public License
+
+
+  % definitions of logical connectives and quantifiers
+
+  :- op(1130, xfy, <=>). % equivalence
+  :- op(1110, xfy, =>).  % implication
+  %                      % disjunction (;)
+  %                      % conjunction (,)
+  :- op( 500, fy, ~).    % negation
+  :- op( 500, fy, all).  % universal quantifier
+  :- op( 500, fy, ex).   % existential quantifier
+  :- op( 500,xfy, :).
+
+
+  % ------------------------------------------------------------------
+  %  make_matrix(+Fml,-Matrix,+Settings)
+  %    -  transform first-order formula into set of clauses (matrix)
+  %
+  %  Fml, Matrix: first-order formula and matrix
+  %
+  %  Settings: list of settings, which can contain def, nodef and conj;
+  %            if it contains nodef/def, no definitional transformation
+  %            or a complete definitional transformation is done,
+  %            otherwise a definitional transformation is done for
+  %            the conjecture and the standard transformation is done
+  %            for the axioms; conjecture is marked if conj is given
+  %
+  %  Syntax of Fml: negation '~', disjunction ';', conjunction ',',
+  %      implication '=>', equivalence '<=>', universal/existential
+  %      quantifier 'all X:<Formula>'/'ex X:<Formula>' where 'X' is a
+  %      Prolog variable, and atomic formulae are Prolog atoms.
+  %
+  %  Example: make_matrix(ex Y:(all X:((p(Y) => p(X)))),Matrix,[]).
+  %           Matrix = [[-(p(X1))], [p(1 ^ [X1])]]
+
+  make_matrix(Fml,Matrix,Set) :-
+      univar(Fml,[],F1),
+      ( member(conj,Set), F1=(A=>C) -> F2=((A,#)=>(#,C)) ; F2=F1 ),
+      ( member(nodef,Set) ->
+         def_nnf(F2,NNF,1,_,nnf), dnf(NNF,DNF)
+         ;
+         \+member(def,Set), F2=(B=>D) ->
+          def_nnf(~(B),NNF,1,I,nnf), dnf(NNF,DNF1),
+          def_nnf(D,DNF2,I,_,def), DNF=(DNF2;DNF1)
+          ;
+          def_nnf(F2,DNF,1,_,def)
+      ),
+      mat(DNF,M),
+      ( member(reo(I),Set) -> mreorder(M,Matrix,I) ; Matrix=M ).
+
+  % ------------------------------------------------------------------
+  %  def_nnf(+Fml,-DEF)  -  transform formula into a definitional
+  %                         Skolemized negation normal form (DEF)
+  %  Fml, DEF: first-order formula and formula in DEF
+  %
+  %  Example: def_nnf(ex Y:(all X:((p(Y) => p(X)))),DEF,def).
+  %           DEF = ~ p(X1) ; p(1 ^ [X1])
+
+  def_nnf(Fml,DEF,I,I1,Set) :-
+      def(Fml,[],NNF,DEF1,_,I,I1,Set), def(DEF1,NNF,DEF).
+
+  def([],Fml,Fml).
+  def([(A,(B;C))|DefL],DEF,Fml) :- !, def([(A,B),(A,C)|DefL],DEF,Fml).
+  def([A|DefL],DEF,Fml) :- def(DefL,(A;DEF),Fml).
+
+  def(Fml,FreeV,NNF,DEF,Paths,I,I1,Set) :-
+      ( Fml = ~(~A)      -> Fml1 = A;
+        Fml = ~(all X:F) -> Fml1 = (ex X: ~F);
+        Fml = ~(ex X:F)  -> Fml1 = (all X: ~F);
+        Fml = ~((A ; B)) -> Fml1 = ((~A , ~B));
+        Fml = ~((A , B)) -> Fml1 = (~A ; ~B);
+        Fml = (A => B)   -> Fml1 = (~A ; B);
+        Fml = ~((A => B))-> Fml1 = ((A , ~B));
+        Fml = (A <=> B)  ->
+        ( Set=def        -> Fml1 = ((A => B) , (B => A));
+                            Fml1 = ((A , B) ; (~A , ~B)) );
+        Fml = ~((A<=>B)) -> Fml1 = ((A , ~B) ; (~A , B)) ), !,
+      def(Fml1,FreeV,NNF,DEF,Paths,I,I1,Set).
+
+  def((ex X:F),FreeV,NNF,DEF,Paths,I,I1,Set) :- !,
+      def(F,[X|FreeV],NNF,DEF,Paths,I,I1,Set).
+
+  def((all X:Fml),FreeV,NNF,DEF,Paths,I,I1,Set) :- !,
+      copy_term((X,Fml,FreeV),((I^FreeV),Fml1,FreeV)), I2 is I+1,
+      def(Fml1,FreeV,NNF,DEF,Paths,I2,I1,Set).
+
+  def((A ; B),FreeV,NNF,DEF,Paths,I,I1,Set) :- !,
+      def(A,FreeV,NNF1,DEF1,Paths1,I,I2,Set),
+      def(B,FreeV,NNF2,DEF2,Paths2,I2,I1,Set),
+      append(DEF1,DEF2,DEF), Paths is Paths1 * Paths2,
+      (Paths1 > Paths2 -> NNF = (NNF2;NNF1);
+                          NNF = (NNF1;NNF2)).
+
+  def((A , B),FreeV,NNF,DEF,Paths,I,I1,Set) :- !,
+      def(A,FreeV,NNF3,DEF3,Paths1,I,I2,Set),
+      ( NNF3=(_;_), Set=def -> append([(~I2^FreeV,NNF3)],DEF3,DEF1),
+                               NNF1=I2^FreeV, I3 is I2+1 ;
+                               DEF1=DEF3, NNF1=NNF3, I3 is I2 ),
+      def(B,FreeV,NNF4,DEF4,Paths2,I3,I4,Set),
+      ( NNF4=(_;_), Set=def -> append([(~I4^FreeV,NNF4)],DEF4,DEF2),
+                               NNF2=I4^FreeV, I1 is I4+1 ;
+                               DEF2=DEF4, NNF2=NNF4, I1 is I4 ),
+      append(DEF1,DEF2,DEF), Paths is Paths1 + Paths2,
+      (Paths1 > Paths2 -> NNF = (NNF2,NNF1);
+                          NNF = (NNF1,NNF2)).
+
+  def(Lit,_,Lit,[],1,I,I,_).
+
+  % ------------------------------------------------------------------
+  %  dnf(+NNF,-DNF)  -  transform formula in NNF into formula in DNF
+  %  NNF, DNF: formulae in NNF and DNF
+  %
+  %  Example: dnf(((p;~p),(q;~q)),DNF).
+  %           DNF = (p, q ; p, ~ q) ; ~ p, q ; ~ p, ~ q
+
+  dnf(((A;B),C),(F1;F2)) :- !, dnf((A,C),F1), dnf((B,C),F2).
+  dnf((A,(B;C)),(F1;F2)) :- !, dnf((A,B),F1), dnf((A,C),F2).
+  dnf((A,B),F) :- !, dnf(A,A1), dnf(B,B1),
+      ( (A1=(C;D);B1=(C;D)) -> dnf((A1,B1),F) ; F=(A1,B1) ).
+  dnf((A;B),(A1;B1)) :- !, dnf(A,A1), dnf(B,B1).
+  dnf(Lit,Lit).
+
+  % ------------------------------------------------------------------
+  %  mat(+DNF,-Matrix)  -  transform formula in DNF into matrix
+  %  DNF, Matrix: formula in DNF, matrix
+  %
+  %  Example: mat(((p, q ; p, ~ q) ; ~ p, q ; ~ p, ~ q),Matrix).
+  %           Matrix = [[p, q], [p, -(q)], [-(p), q], [-(p), -(q)]]
+
+  mat((A;B),M) :- !, mat(A,MA), mat(B,MB), append(MA,MB,M).
+  mat((A,B),M) :- !, (mat(A,[CA]),mat(B,[CB]) -> union2(CA,CB,M);M=[]).
+  mat(~Lit,[[-Lit]]) :- !.
+  mat(Lit,[[Lit]]).
+
+  % ------------------------------------------------------------------
+  %  univar(+Fml,[],-Fml1)  -  rename variables
+  %  Fml, Fml1: first-order formulae
+  %
+  %  Example: univar((all X:(p(X) => (ex X:p(X)))),[],F1).
+  %           F1 = all Y : (p(Y) => ex Z : p(Z))
+
+  univar(X,_,X)  :- (atomic(X);var(X);X==[[]]), !.
+  univar(F,Q,F1) :-
+      F=..[A,B|T], ( (A=ex;A=all) -> B=(X:C), delete2(Q,X,Q1),
+      copy_term((X,C,Q1),(Y,D,Q1)), univar(D,[Y|Q],D1), F1=..[A,Y:D1] ;
+      univar(B,Q,B1), univar(T,Q,T1), F1=..[A,B1|T1] ).
+
+  % ------------------------------------------------------------------
+  %  union2/member2 - union and member for lists without unification
+
+  union2([],L,[L]).
+  union2([X|L1],L2,M) :- member2(X,L2), !, union2(L1,L2,M).
+  union2([X|_],L2,M)  :- (-Xn=X;-X=Xn) -> member2(Xn,L2), !, M=[].
+  union2([X|L1],L2,M) :- union2(L1,[X|L2],M).
+
+  member2(X,[Y|_]) :- X==Y, !.
+  member2(X,[_|T]) :- member2(X,T).
+
+  % ------------------------------------------------------------------
+  %  delete2 - delete variable from list
+
+  delete2([],_,[]).
+  delete2([X|T],Y,T1) :- X==Y, !, delete2(T,Y,T1).
+  delete2([X|T],Y,[X|T1]) :- delete2(T,Y,T1).
+
+  % ------------------------------------------------------------------
+  %  mreorder - reorder clauses
+
+  mreorder(M,M,0) :- !.
+  mreorder(M,M1,I) :-
+      length(M,L), K is L//3, append(A,D,M), length(A,K),
+      append(B,C,D), length(C,K), mreorder2(C,A,B,M2), I1 is I-1,
+      mreorder(M2,M1,I1).
+
+  mreorder2([],[],C,C).
+  mreorder2([A|A1],[B|B1],[C|C1],[A,B,C|M1]) :- mreorder2(A1,B1,C1,M1).
+  """,
+  "leancop_tptp2.pl" => ~S"""
+  %% File: leancop_tptp2.pl  -  Version: 1.1  -  Date: 3 July 2009
+  %%
+  %% Purpose: 1. Translate formula from TPTP into leanCoP syntax
+  %%          2. Add equality axioms to the given formula
+  %%
+  %% Author:  Jens Otten
+  %% Web:     www.leancop.de
+  %%
+  %% Usage: leancop_tptp2(X,F). % where X is a problem file in TPTP
+  %%                            %  syntax and F the translated formula
+  %%        leancop_equal(F,G). % where F is a formula and G the
+  %%                            %  formula with added equality axioms
+  %%
+  %% Copyright: (c) 2009 by Jens Otten
+  %% License:   GNU General Public License
+
+
+  % definitions of logical connectives and quantifiers
+
+  % leanCoP syntax
+  :- op(1130, xfy, <=>). % equivalence
+  :- op(1110, xfy, =>).  % implication
+  %                      % disjunction (;)
+  %                      % conjunction (,)
+  :- op( 500, fy, ~).    % negation
+  :- op( 500, fy, all).  % universal quantifier
+  :- op( 500, fy, ex).   % existential quantifier
+  :- op( 500,xfy, :).
+
+  % TPTP syntax
+  :- op(1130, xfy, <~>).  % negated equivalence
+  :- op(1110, xfy, <=).   % implication
+  :- op(1100, xfy, '|').  % disjunction
+  :- op(1100, xfy, '~|'). % negated disjunction
+  :- op(1000, xfy, &).    % conjunction
+  :- op(1000, xfy, ~&).   % negated conjunction
+  :- op( 500, fy, !).     % universal quantifier
+  :- op( 500, fy, ?).     % existential quantifier
+  :- op( 400, xfx, =).    % equality
+  :- op( 300, xf, !).     % negated equality (for !=)
+  :- op( 299, fx, $).     % for $true/$false
+
+  % TPTP syntax to leanCoP syntax mapping
+
+  op_tptp2((A<=>B),(A1<=>B1),   [A,B],[A1,B1]).
+  op_tptp2((A<~>B),~((A1<=>B1)),[A,B],[A1,B1]).
+  op_tptp2((A=>B),(A1=>B1),     [A,B],[A1,B1]).
+  op_tptp2((A<=B),(B1=>A1),     [A,B],[A1,B1]).
+  op_tptp2((A|B),(A1;B1),       [A,B],[A1,B1]).
+  op_tptp2((A'~|'B),~((A1;B1)), [A,B],[A1,B1]).
+  op_tptp2((A&B),(A1,B1),       [A,B],[A1,B1]).
+  op_tptp2((A~&B),~((A1,B1)),   [A,B],[A1,B1]).
+  op_tptp2(~A,~A1,[A],[A1]).
+  op_tptp2((! [V]:A),(all V:A1),     [A],[A1]).
+  op_tptp2((! [V|Vars]:A),(all V:A1),[! Vars:A],[A1]).
+  op_tptp2((? [V]:A),(ex V:A1),      [A],[A1]).
+  op_tptp2((? [V|Vars]:A),(ex V:A1), [? Vars:A],[A1]).
+  op_tptp2($true,(true___=>true___),      [],[]).
+  op_tptp2($false,(false___ , ~ false___),[],[]).
+  op_tptp2(A=B,~(A1=B),[],[]) :- \+var(A), A=(A1!).
+  op_tptp2(P,P,[],[]).
+
+
+  %%% translate into leanCoP syntax
+
+  leancop_tptp2(File,F) :- leancop_tptp2(File,'',[_],F,_).
+
+  leancop_tptp2(File,AxPath,AxNames,F,Con) :-
+      open(File,read,Stream), ( fof2cop(Stream,AxPath,AxNames,A,Con)
+      -> close(Stream) ; close(Stream), fail ),
+      ( Con=[] -> F=A ; A=[] -> F=Con ; F=(A=>Con) ).
+
+  fof2cop(Stream,AxPath,AxNames,F,Con) :-
+      read(Stream,Term),
+      ( Term=end_of_file -> F=[], Con=[] ;
+        ( Term=..[fof,Name,Type,Fml|_] ->
+          ( \+member(Name,AxNames) -> true ; fml2cop([Fml],[Fml1]) ),
+          ( Type=conjecture -> Con=Fml1 ; Con=Con1 ) ;
+          ( Term=include(File), AxNames2=[_] ;
+            Term=include(File,AxNames2) ) -> name(AxPath,AL),
+            name(File,FL), append(AL,FL,AxL), name(AxFile,AxL),
+            leancop_tptp2(AxFile,'',AxNames2,Fml1,_), Con=Con1
+        ), fof2cop(Stream,AxPath,AxNames,F1,Con1),
+        ( Term=..[fof,N,Type|_], (Type=conjecture;\+member(N,AxNames))
+        -> (F1=[] -> F=[] ; F=F1) ; (F1=[] -> F=Fml1 ; F=(Fml1,F1)) )
+      ).
+
+  fml2cop([],[]).
+  fml2cop([F|Fml],[F1|Fml1]) :-
+      op_tptp2(F,F1,FL,FL1) -> fml2cop(FL,FL1), fml2cop(Fml,Fml1).
+
+
+  %%% add equality axioms
+
+  leancop_equal(F,F1) :-
+      collect_predfunc([F],PL,FL), append(PL2,[(=,2)|PL3],PL),
+      append(PL2,PL3,PL1) -> basic_equal_axioms(F0),
+      subst_pred_axioms(PL1,F2), (F2=[] -> F3=F0 ; F3=(F0,F2)),
+      subst_func_axioms(FL,F4), (F4=[] -> F5=F3 ; F5=(F3,F4)),
+      ( F=(A=>C) -> F1=((F5,A)=>C) ; F1=(F5=>F) ) ; F1=F.
+
+  basic_equal_axioms(F) :-
+      F=(( all X:(X=X) ),
+         ( all X:all Y:((X=Y)=>(Y=X)) ),
+         ( all X:all Y:all Z:(((X=Y),(Y=Z))=>(X=Z)) )).
+
+  % generate substitution axioms
+
+  subst_pred_axioms([],[]).
+  subst_pred_axioms([(P,I)|PL],F) :-
+      subst_axiom(A,B,C,D,E,I), subst_pred_axioms(PL,F1), P1=..[P|C],
+      P2=..[P|D], E=(B,P1=>P2), ( F1=[] -> F=A ; F=(A,F1) ).
+
+  subst_func_axioms([],[]).
+  subst_func_axioms([(P,I)|FL],F) :-
+      subst_axiom(A,B,C,D,E,I), subst_func_axioms(FL,F1), P1=..[P|C],
+      P2=..[P|D], E=(B=>(P1=P2)), ( F1=[] -> F=A ; F=(A,F1) ).
+
+  subst_axiom((all X:all Y:E),(X=Y),[X],[Y],E,1).
+  subst_axiom(A,B,[X|C],[Y|D],E,I) :-
+      I>1, I1 is I-1, subst_axiom(A1,B1,C,D,E,I1),
+      A=(all X:all Y:A1), B=((X=Y),B1).
+
+  % collect predicate & function symbols
+
+  collect_predfunc([],[],[]).
+  collect_predfunc([F|Fml],PL,FL) :-
+      ( ( F=..[<=>|F1] ; F=..[=>|F1] ; F=..[;|F1] ; F=..[','|F1] ;
+          F=..[~|F1] ; (F=..[all,_:F2] ; F=..[ex,_:F2]), F1=[F2] ) ->
+        collect_predfunc(F1,PL1,FL1) ; F=..[P|Arg], length(Arg,I),
+        I>0 ->  PL1=[(P,I)], collect_func(Arg,FL1) ; PL1=[], FL1=[] ),
+      collect_predfunc(Fml,PL2,FL2),
+      union1(PL1,PL2,PL), union1(FL1,FL2,FL).
+
+  collect_func([],[]).
+  collect_func([F|FunL],FL) :-
+      ( \+var(F), F=..[F1|Arg], length(Arg,I), I>0 ->
+        collect_func(Arg,FL1), union1([(F1,I)],FL1,FL2) ; FL2=[] ),
+      collect_func(FunL,FL3), union1(FL2,FL3,FL).
+
+  union1([],L,L).
+  union1([H|L1],L2,L3) :- member(H,L2), !, union1(L1,L2,L3).
+  union1([H|L1],L2,[H|L3]) :- union1(L1,L2,L3).
+  """,
+  "leanhat_swi.pl" => ~S"""
+  %% File: leanhat_swi.pl  -  Version: 1.0  -  Date: 1 April 2025
+  %%
+  %% Purpose: leanHaT: A Sequent Prover for the Logic of HT
+  %%
+  %% Author:  Jens Otten
+  %% Web:     www.leancop.de/leanhat/
+  %%
+  %% Usage:   prove(F).    % where F is a first-order formula, e.g.
+  %%                       %  F=((p,all X:(p=>q(X)))=>all Y:q(Y))
+  %%
+  %% Copyright: (c) 2025 by Jens Otten
+  %% License:   GNU General Public License
+
+  % definitions of logical connectives and quantifiers
+
+  :- op(1130, xfy, <=>). :- op(1110, xfy, =>). :- op(500, fy, ~).
+  :- op( 500,  fy, all). :- op( 500,  fy, ex). :- op(500,xfy, :).
+
+
+  % -----------------------------------------------------------------
+  % prove(F,Proof) - prove formula F
+
+  prove(F) :- univar(F,[],F1), prove(F1,1).
+
+  prove(F,I) :- prove([]>[F],s,[],I).
+  prove(F,I) :- \+ no_mul([([F],0)]), I1 is I+1, prove(F,I1).
+
+  % -----------------------------------------------------------------
+  % fml(F,Pol,L1>R1,L2>R2,L3>R3,S,FreeV,NewX,Cpy1,Cpy2)
+  % - specification of sequent rules
+  %
+  % F: formula, Pol:polarity, S:position, FreeV: free variable
+  % NewX: new free variable, Cpy1: to be copied and unified with Cpy2
+  % Ln>Rn: add to left/right side of 1st/2nd/3rd premise (n=1,2,3)
+
+  fml((A,B),    1, [A,B] > [],   [] > [],     [] > [], _,_,[],[],[]).
+  fml((A;B),    0, [] > [A,B],   [] > [],     [] > [], _,_,[],[],[]).
+  fml(~ (A,B),  0, [] > [~A,~B], [] > [],     [] > [], _,_,[],[],[]).
+  fml(~ (A;B),  1, [~A,~B] > [], [] > [],     [] > [], _,_,[],[],[]).
+  fml(~ (A=>B), 1, [~B] > [~A],  [] > [],     [] > [], _,_,[],[],[]).
+  fml(~ (~A),   1, [] > [~A],    [] > [],     [] > [], _,_,[],[],[]).
+  fml(~ (~A),   0, [~A] > [],    [] > [],     [] > [], _,_,[],[],[]).
+
+  fml((A,B),    0, [] > [A],     [] > [B],    [] > [], _,_,[],[],[]).
+  fml((A;B),    1, [A] > [],     [B] > [],    [] > [], _,_,[],[],[]).
+  fml(~ (A,B),  1, [~A] > [],    [~B] > [],   [] > [], _,_,[],[],[]).
+  fml(~ (A;B),  0, [] > [~A],    [] > [~B],   [] > [], _,_,[],[],[]).
+  fml(~ (A=>B), 0, [~A] > [],    [] > [~B],   [] > [], _,_,[],[],[]).
+  fml((A=>B),   0, [A] > [B],    [~B] > [~A], [] > [], _,_,[],[],[]).
+  fml((A=>B),   1, [~A] > [],    [] > [A,~B], [B]>[],  _,_,[],[],[]).
+
+  fml((A<=>B),  1, [((A=>B),(B=>A))] > [],[]>[],[]>[], _,_,[],[],[]).
+  fml((A<=>B),  0, [] > [((A=>B),(B=>A))],[]>[],[]>[], _,_,[],[],[]).
+  fml(~ (A<=>B),1, [~ ((A=>B),(B=>A))]>[],[]>[],[]>[], _,_,[],[],[]).
+  fml(~ (A<=>B),0, []>[~ ((A=>B),(B=>A))],[]>[],[]>[], _,_,[],[],[]).
+
+  fml(~all X:A, 1, [~C] > [], []>[], []>[],  S,FV,[],(X,A),(S^FV,C)).
+  fml(~ex X:A,  0, [] > [~C], []>[], []>[],  S,FV,[],(X,A),(S^FV,C)).
+  fml( all X:A, 0, [] > [C],  []>[], []>[],  S,FV,[],(X,A),(S^FV,C)).
+  fml( ex X:A,  1, [C] > [],  []>[], []>[],  S,FV,[],(X,A),(S^FV,C)).
+
+  fml(~all X:A, 0, [] > [~C,~all X:A], []>[],[]>[], _,_,[Y],X:A,Y:C).
+  fml(~ex X:A,  1, [~C,~ex X:A] > [],  []>[],[]>[], _,_,[Y],X:A,Y:C).
+  fml( all X:A, 1, [C,all X:A] > [],   []>[],[]>[], _,_,[Y],X:A,Y:C).
+  fml( ex X:A,  0, [] > [C,ex X:A],    []>[],[]>[], _,_,[Y],X:A,Y:C).
+
+  % -----------------------------------------------------------------
+  % prove(Left>Right,S,FreeV,VarLim) - proof search
+
+  prove(Left>Right,_,_,_) :-
+      member(A,Left), ( member(B,Right) ; member(~B,Left) ), ( A==B ->
+      ! ; ( A=(~C) ->  C=..[P|_] ; A=..[P|_] ), P\=',', P\=';', P\='~',
+      P\='=>', P\='<=>', P\=all, P\=ex, unify_with_occurs_check(A,B) ).
+
+  prove(Left>Right,S,FreeV,VarLim) :-
+      fml(F,Pol,L1>R1,L2>R2,L3>R3,S,FreeV,V,Cpy1,Cpy2),
+      ( Pol=1, append(LeftA,[F|LeftB],Left), RightA=Right, RightB=[] ;
+        Pol=0, append(RightA,[F|RightB],Right), LeftA=Left, LeftB=[] ),
+      ( V=[] -> ! ; \+ length(FreeV,VarLim) ),
+      append(FreeV,V,FreeV1), copy_term((Cpy1,FreeV),(Cpy2,FreeV)),
+      append(LeftA,LeftB,L0), append(RightA,RightB,R0),
+      append(L1,L0,Left1), append(R1,R0,Right1), append(L2,L0,Left2),
+      append(R2,R0,Right2), append(L3,L0,Left3), append(R3,R0,Right3),
+      prove(Left1>Right1,l(S),FreeV1,VarLim),
+      ( L2=[],R2=[] -> true ; prove(Left2>Right2,r(S),FreeV1,VarLim) ),
+      ( L3=[],R3=[] -> true ; prove(Left3>Right3,x(S),FreeV1,VarLim) ).
+
+  % -----------------------------------------------------------------
+  % no_mul([FList]) - check multiplicities in FList
+
+  no_mul([]).
+  no_mul([([F,G],Pol)|T]) :- !, no_mul([([F],Pol),([G],Pol)|T]).
+  no_mul([([F],Pol)|T]) :-
+      fml(F,Pol,L1>R1,L2>R2,_,_,_,V,U,U), !, V==[],
+      no_mul([(L1,1),(R1,0),(L2,1),(R2,0)|T]).
+  no_mul([_|T]):- no_mul(T).
+
+  % -----------------------------------------------------------------
+  % univar(F,[],F1) - create unique variable names in F, return F1
+
+  univar(X,_,X)  :- (atomic(X);var(X);X==[[]]), !.
+  univar(F,Q,F1) :-
+      F=..[A,B|T], ( (A=ex;A=all),B=X:C -> delete2(Q,X,Q1),
+      copy_term((X,C,Q1),(Y,D,Q1)), univar(D,[Y|Q],E), F1=..[A,Y:E] ;
+      univar(B,Q,B1), univar(T,Q,T1), F1=..[A,B1|T1] ).
+
+  % delete variable from list
+  delete2([],_,[]).
+  delete2([X|T],Y,T1) :- X==Y, !, delete2(T,Y,T1).
+  delete2([X|T],Y,[X|T1]) :- delete2(T,Y,T1).
+  """,
+  "nanocop_tptp2.pl" => ~S"""
+  %% File: nanocop_tptp2.pl  -  Version: 1.0  -  Date: 17 January 2017
+  %%
+  %% Purpose: 1. Translate formula from TPTP into leanCoP syntax
+  %%          2. Add equality axioms to the given formula
+  %%
+  %% Author:  Jens Otten
+  %% Web:     www.leancop.de/nanocop/
+  %%
+  %% Usage: leancop_tptp2(X,F). % where X is a problem file using TPTP
+  %%                            %  syntax and F the translated formula
+  %%        leancop_equal(F,G). % where F is a formula and G the
+  %%                            %  formula with added equality axioms
+  %%
+  %% Copyright: (c) 2009-2017 by Jens Otten
+  %% License:   GNU General Public License
+
+
+  % definitions of logical connectives and quantifiers
+
+  % leanCoP syntax
+  :- op(1130, xfy, <=>). % equivalence
+  :- op(1110, xfy, =>).  % implication
+  %                      % disjunction (;)
+  %                      % conjunction (,)
+  :- op( 500, fy, ~).    % negation
+  :- op( 500, fy, all).  % universal quantifier
+  :- op( 500, fy, ex).   % existential quantifier
+  :- op( 500,xfy, :).
+
+  % TPTP syntax
+  :- op(1130, xfy, <~>).  % negated equivalence
+  :- op(1110, xfy, <=).   % implication
+  :- op(1100, xfy, '|').  % disjunction
+  :- op(1100, xfy, '~|'). % negated disjunction
+  :- op(1000, xfy, &).    % conjunction
+  :- op(1000, xfy, ~&).   % negated conjunction
+  :- op( 500, fy, !).     % universal quantifier
+  :- op( 500, fy, ?).     % existential quantifier
+  :- op( 400, xfx, =).    % equality
+  :- op( 300, xf, !).     % negated equality (for !=)
+  :- op( 299, fx, $).     % for $true/$false
+
+  % TPTP syntax to leanCoP syntax mapping
+
+  op_tptp2((A<=>B),(A1<=>B1),   [A,B],[A1,B1]).
+  op_tptp2((A<~>B),~((A1<=>B1)),[A,B],[A1,B1]).
+  op_tptp2((A=>B),(A1=>B1),     [A,B],[A1,B1]).
+  op_tptp2((A<=B),(B1=>A1),     [A,B],[A1,B1]).
+  op_tptp2((A|B),(A1;B1),       [A,B],[A1,B1]).
+  op_tptp2((A'~|'B),~((A1;B1)), [A,B],[A1,B1]).
+  op_tptp2((A&B),(A1,B1),       [A,B],[A1,B1]).
+  op_tptp2((A~&B),~((A1,B1)),   [A,B],[A1,B1]).
+  op_tptp2(~A,~A1,[A],[A1]).
+  op_tptp2((! [V]:A),(all V:A1),     [A],[A1]).
+  op_tptp2((! [V|Vars]:A),(all V:A1),[! Vars:A],[A1]).
+  op_tptp2((? [V]:A),(ex V:A1),      [A],[A1]).
+  op_tptp2((? [V|Vars]:A),(ex V:A1), [? Vars:A],[A1]).
+  op_tptp2($true,(true___=>true___),      [],[]).
+  op_tptp2($false,(false___ , ~ false___),[],[]).
+  op_tptp2(A=B,~(A1=B),[],[]) :- \+var(A), A=(A1!).
+  op_tptp2(P,P,[],[]).
+
+
+  %%% translate into leanCoP syntax
+
+  leancop_tptp2(File,F) :- leancop_tptp2(File,'',[_],F,_).
+
+  leancop_tptp2(File,AxPath,AxNames,F,Con) :-
+      open(File,read,Stream), ( fof2cop(Stream,AxPath,AxNames,A,Con)
+      -> close(Stream) ; close(Stream), fail ),
+      ( Con=[] -> F=A ; A=[] -> F=Con ; F=(A=>Con) ).
+
+  fof2cop(Stream,AxPath,AxNames,F,Con) :-
+      read(Stream,Term),
+      ( Term=end_of_file -> F=[], Con=[] ;
+        ( Term=..[fof,Name,Type,Fml|_] ->
+          ( \+member(Name,AxNames) -> true ; fml2cop([Fml],[Fml1]) ),
+          ( Type=conjecture -> Con=Fml1 ; Con=Con1 ) ;
+          ( Term=include(File), AxNames2=[_] ;
+            Term=include(File,AxNames2) ) -> name(AxPath,AL),
+            name(File,FL), append(AL,FL,AxL), name(AxFile,AxL),
+            leancop_tptp2(AxFile,'',AxNames2,Fml1,_), Con=Con1
+        ), fof2cop(Stream,AxPath,AxNames,F1,Con1),
+        ( Term=..[fof,N,Type|_], (Type=conjecture;\+member(N,AxNames))
+        -> (F1=[] -> F=[] ; F=F1) ; (F1=[] -> F=Fml1 ; F=(Fml1,F1)) )
+      ).
+
+  fml2cop([],[]).
+  fml2cop([F|Fml],[F1|Fml1]) :-
+      op_tptp2(F,F1,FL,FL1) -> fml2cop(FL,FL1), fml2cop(Fml,Fml1).
+
+
+  %%% add equality axioms
+
+  leancop_equal(F,F1) :-
+      collect_predfunc([F],PL,FL), append(PL2,[(=,2)|PL3],PL),
+      append(PL2,PL3,PL1) -> basic_equal_axioms(F0),
+      subst_pred_axioms(PL1,F2), (F2=[] -> F3=F0 ; F3=(F0,F2)),
+      subst_func_axioms(FL,F4), (F4=[] -> F5=F3 ; F5=(F3,F4)),
+      ( F=(A=>C) -> F1=((F5,A)=>C) ; F1=(F5=>F) ) ; F1=F.
+
+  basic_equal_axioms(F) :-
+      F=(( all X:(X=X) ),
+         ( all X:all Y:((X=Y)=>(Y=X)) ),
+         ( all X:all Y:all Z:(((X=Y),(Y=Z))=>(X=Z)) )).
+
+  % generate substitution axioms
+
+  subst_pred_axioms([],[]).
+  subst_pred_axioms([(P,I)|PL],F) :-
+      subst_axiom(A,B,C,D,E,I), subst_pred_axioms(PL,F1), P1=..[P|C],
+      P2=..[P|D], E=(B,P1=>P2), ( F1=[] -> F=A ; F=(A,F1) ).
+
+  subst_func_axioms([],[]).
+  subst_func_axioms([(P,I)|FL],F) :-
+      subst_axiom(A,B,C,D,E,I), subst_func_axioms(FL,F1), P1=..[P|C],
+      P2=..[P|D], E=(B=>(P1=P2)), ( F1=[] -> F=A ; F=(A,F1) ).
+
+  subst_axiom((all X:all Y:E),(X=Y),[X],[Y],E,1).
+  subst_axiom(A,B,[X|C],[Y|D],E,I) :-
+      I>1, I1 is I-1, subst_axiom(A1,B1,C,D,E,I1),
+      A=(all X:all Y:A1), B=((X=Y),B1).
+
+  % collect predicate & function symbols
+
+  collect_predfunc([],[],[]).
+  collect_predfunc([F|Fml],PL,FL) :-
+      ( ( F=..[<=>|F1] ; F=..[=>|F1] ; F=..[;|F1] ; F=..[','|F1] ;
+          F=..[~|F1] ; (F=..[all,_:F2] ; F=..[ex,_:F2]), F1=[F2] ) ->
+        collect_predfunc(F1,PL1,FL1) ; F=..[P|Arg], length(Arg,I),
+        I>0 ->  PL1=[(P,I)], collect_func(Arg,FL1) ; PL1=[], FL1=[] ),
+      collect_predfunc(Fml,PL2,FL2),
+      union1(PL1,PL2,PL), union1(FL1,FL2,FL).
+
+  collect_func([],[]).
+  collect_func([F|FunL],FL) :-
+      ( \+var(F), F=..[F1|Arg], length(Arg,I), I>0 ->
+        collect_func(Arg,FL1), union1([(F1,I)],FL1,FL2) ; FL2=[] ),
+      collect_func(FunL,FL3), union1(FL2,FL3,FL).
+
+  union1([],L,L).
+  union1([H|L1],L2,L3) :- member(H,L2), !, union1(L1,L2,L3).
+  union1([H|L1],L2,[H|L3]) :- union1(L1,L2,L3).
+
+  """,
+  "ileancop_swi.pl" => ~S"""
+  %% Version: 1.0  -  Date: 25/11/2004  -  File: ileancop_swi.pl
+  %%
+  %% Purpose: ileanCoP: A Connection Prover for Intuitionistic Logic
+  %%
+  %% Author:  Jens Otten
+  %% Web:     www.leancop.de/ileancop/
+  %%
+  %% Usage:   prove(F).   % where F is a first-order formula
+  %%                      %  e.g. F=((p,all X:(p=>q(X)))=>all Y:q(Y))
+  %%
+  %% Copyright: (c) 2005 by Jens Otten
+  %% License:   GNU General Public License
+
+
+  :- [nnf_mm_intu].
+  :- dynamic(pathlim/0).
+
+  %%% prove formula F
+
+  prove(F) :- Time1 is cputime, make_matrix_intu(F,M), prove(M,1),
+              Time2 is cputime, Time is Time2-Time1, print(Time).
+
+  prove(Mat,PathLim) :-
+       append(MatA,[FV:Cla|MatB],Mat), \+member(-(_):_,Cla),
+       append(MatA,MatB,Mat1),
+       prove([!:[]],[FV:[-(!):(-[])|Cla]|Mat1],[],PathLim,[PreSet,FreeV]),
+       check_addco(FreeV), prefix_unify(PreSet).
+
+  prove(Mat,PathLim) :-
+       retract(pathlim), PathLim1 is PathLim+1, prove(Mat,PathLim1).
+
+  prove([],_,_,_,[[],[]]).
+
+  prove([Lit:Pre|Cla],Mat,Path,PathLim,[PreSet,FreeV]) :-
+       (-NegLit=Lit;-Lit=NegLit) ->
+          ( member(NegL:PreN,Path), unify_with_occurs_check(NegL,NegLit),
+            \+ \+ prefix_unify([Pre=PreN]), PreSet1=[], FreeV3=[]
+            ;
+            append(MatA,[Cla1|MatB],Mat), copy_term(Cla1,FV:Cla2),
+            append(ClaA,[NegL:PreN|ClaB],Cla2),
+            unify_with_occurs_check(NegL,NegLit),
+            \+ \+ prefix_unify([Pre=PreN]),
+            append(ClaA,ClaB,Cla3),
+            ( Cla1==FV:Cla2 ->
+                 append(MatB,MatA,Mat1)
+                 ;
+                 length(Path,K), ( K<PathLim ->
+                 append(MatB,[Cla1|MatA],Mat1) ;
+                 \+ pathlim -> assert(pathlim), fail )
+            ),
+            prove(Cla3,Mat1,[Lit:Pre|Path],PathLim,[PreSet1,FreeV1]),
+            append(FreeV1,FV,FreeV3)
+          ),
+          prove(Cla,Mat,Path,PathLim,[PreSet2,FreeV2]),
+          append([Pre=PreN|PreSet1],PreSet2,PreSet),
+          append(FreeV2,FreeV3,FreeV).
+
+
+  %%% prefix unification
+
+  prefix_unify([]).
+  prefix_unify([S=T|G]) :- (-S2=S -> T2=T ; -S2=T, T2=S),
+                           flatten([S2,_],S1), flatten(T2,T1),
+                           tunify(S1,[],T1), prefix_unify(G).
+
+  tunify([],[],[]).
+  tunify([],[],[X|T])       :- tunify([X|T],[],[]).
+  tunify([X1|S],[],[X2|T])  :- (var(X1) -> (var(X2), X1==X2);
+                               (\+var(X2), unify_with_occurs_check(X1,X2))),
+                               !, tunify(S,[],T).
+  tunify([C|S],[],[V|T])    :- \+var(C), !, var(V), tunify([V|T],[],[C|S]).
+  tunify([V|S],Z,[])        :- unify_with_occurs_check(V,Z), tunify(S,[],[]).
+  tunify([V|S],[],[C1|T])   :- \+var(C1), V=[], tunify(S,[],[C1|T]).
+  tunify([V|S],Z,[C1,C2|T]) :- \+var(C1), \+var(C2), append(Z,[C1],V1),
+                               unify_with_occurs_check(V,V1),
+                               tunify(S,[],[C2|T]).
+  tunify([V,X|S],[],[V1|T])     :- var(V1), tunify([V1|T],[V],[X|S]).
+  tunify([V,X|S],[Z1|Z],[V1|T]) :- var(V1), append([Z1|Z],[Vnew],V2),
+                                   unify_with_occurs_check(V,V2),
+                                   tunify([V1|T],[Vnew],[X|S]).
+  tunify([V|S],Z,[X|T])     :- (S=[]; T\=[]; \+var(X)) ->
+                               append(Z,[X],Z1), tunify([V|S],Z1,T).
+
+  %%% check additional quantifier/prefix interaction condition
+
+  check_addco([]).
+  check_addco([[X,Pre]|L]) :- addco(X,Pre), check_addco(L).
+
+  addco(X,_)          :- (atomic(X);var(X);X==[[]]), !.
+  addco(_^_^Pre1,Pre) :- !, prefix_unify([-Pre1=Pre]).
+  addco(T,Pre)        :- T=..[_,T1|T2], addco(T1,Pre), addco(T2,Pre).
+  """,
+  "nnf_mm_intu.pl" => ~S"""
+  %% Version: 1.1  -  Date: 04/11/2004  -  File: nnf_mm_intu.pl
+  %%
+  %% Purpose: - computes Skolemized negation normal form for a
+  %%            first-order formula (based on leanTAP's nnf.pl)
+  %%          - computes disjunctive normal form for a formula
+  %%            in Skolemized negational normal form
+  %%          - computes a matrix form (and applies MULT and TAUT
+  %%            reductions) for a formula in disjunctive normal form
+  %%          - renames variables so that a unique variable name
+  %%            is assigned to each quantifier in a formula
+  %%          - add prefix to each literal (variable/constant for
+  %%            negative/positive occurence of '~', '=>', 'all X:')
+  %%          - add set of tuples [X,P] to each clause for each
+  %%            free variable X with prefix P occuring in clause
+  %%
+  %% Author:  Jens Otten
+  %% Web:     www.leancop.de/ileancop/
+  %%
+  %% Usage:   make_matrix_intu(F,M). % where F is a first-order formula
+  %%                                 % and its clausal form M is returned,
+  %%                                 % where prefixes are added to literals
+  %%                                 % and sets of free variables to clauses
+  %%
+  %% Example: make_matrix(ex Y: (all X: ((p(Y) => p(X))) ), Matrix).
+  %%          Matrix = [[[X1, []]] : [-(p(X1)) : -([1^[X1], 2^[X1]])],
+  %%                    [] : [p(1^[X1]^[1^[X1]]) : [1^[X1], 2^[X1]]]]
+  %%
+  %% Copyright: (c) 2005 by Jens Otten
+  %% License:   GNU General Public License
+
+
+  % connectives and quantifiers
+
+  :- op(1130, xfy, <=>). % equivalence
+  :- op(1110, xfy, =>).  % implication
+  %                      % disjunction (;)
+  %                      % conjunction (,)
+  :- op( 500, fy, ~).    % negation
+  :- op( 500, fy, all).  % universal quantifier
+  :- op( 500, fy, ex).   % existential quantifier
+  :- op( 500,xfy, :).
+
+  % -----------------------------------------------------------------
+  %  nnf(+Fml,?NNF)
+  %
+  % Fml is a first-order formula and NNF its Skolemized negation
+  % normal form (where quantifiers have been removed from NNF).
+  %
+  % Syntax of Fml:
+  %  negation: '~', disj: ';', conj: ',', impl: '=>', eqv: '<=>',
+  %  quant. 'all X:<Formula>', 'ex X:<Formula>' where 'X' is a
+  %  prolog variable.
+  %
+  % Syntax of NNF: negation: '-', disj: ';', conj: ','.
+  %
+  % Example: nnf(ex Y: (all X: ((p(Y) => p(X))) ),NNF).
+  %          NNF = (-(p(X1^[]))) : [1^[X1], 2^[X1]] ;
+  %                p(1^[X1]^[1^[X1]]) : [1^[X1], 2^[X1]]
+
+  nnf(Fml,NNF) :- nnf(Fml:[],[],NNF,_,1,_).
+
+  % -----------------------------------------------------------------
+  %  nnf(+Fml,+FreeV,-NNF,-Paths,+I,-I1)
+  %
+  % Fml,NNF: See above.
+  % FreeV:   List of free variables in Fml.
+  % Paths:   Number of disjunctive paths in Fml.
+  % I,I1:    Integer marks unique position of Fml.
+
+  nnf(Fml:Pre,FreeV,NNF,Paths,I,I1) :-
+      (Fml = ~A         -> Fml1 = -(A),                     Pre1=[I^FreeV];
+       Fml = -(~A)      -> Fml1 = A,                        Pre1=[_];
+       Fml = -(all X:F) -> Fml1 = (ex X: -F),               Pre1=[_];
+       Fml = -(ex X:F)  -> Fml1 = (all X: -F),              Pre1=[];
+       Fml = -((A ; B)) -> Fml1 = ((-A , -B)),              Pre1=[];
+       Fml = -((A , B)) -> Fml1 = (-A ; -B),                Pre1=[];
+       Fml = (A => B)   -> Fml1 = (-A ; B),                 Pre1=[I^FreeV];
+       Fml = -((A => B))-> Fml1 = ((A , -B)),               Pre1=[_];
+       Fml = (A <=> B)  -> Fml1 = ((A => B) , (B => A)),    Pre1=[];
+       Fml = -((A<=>B)) -> Fml1 = -(((A => B) , (B => A))), Pre1=[] ), !,
+      append(Pre,Pre1,Pre2), I2 is I+1,
+      ([Pre3]=Pre1,var(Pre3) -> FreeV1=[Pre3|FreeV] ;
+                                FreeV1=FreeV),
+      nnf(Fml1:Pre2,FreeV1,NNF,Paths,I2,I1).
+
+  nnf((ex X:F):Pre,FreeV,NNF,Paths,I,I1) :- !,
+      copy_term((X,F,FreeV),((X1^Pre),F1,FreeV)),
+      nnf(F1:Pre,[X1|FreeV],NNF,Paths,I,I1).
+
+  nnf((all X:Fml):Pre,FreeV,NNF,Paths,I,I1) :- !,
+      copy_term((X,Fml,FreeV),((I^FreeV^Pre1),Fml1,FreeV)),
+      (Fml= -_ -> Pre1=Pre ;
+                  append(Pre,[I^FreeV],Pre1)),
+      I2 is I+1,
+      nnf(Fml1:Pre1,FreeV,NNF,Paths,I2,I1).
+
+  nnf((A ; B):Pre,FreeV,NNF,Paths,I,I1) :- !,
+      nnf(A:Pre,FreeV,NNF1,Paths1,I,I2),
+      nnf(B:Pre,FreeV,NNF2,Paths2,I2,I1),
+      Paths is Paths1 * Paths2,
+      (Paths1 > Paths2 -> NNF = (NNF2;NNF1);
+                          NNF = (NNF1;NNF2)).
+
+  nnf((A , B):Pre,FreeV,NNF,Paths,I,I1) :- !,
+      nnf(A:Pre,FreeV,NNF1,Paths1,I,I2),
+      nnf(B:Pre,FreeV,NNF2,Paths2,I2,I1),
+      Paths is Paths1 + Paths2,
+      (Paths1 > Paths2 -> NNF = (NNF2,NNF1);
+                          NNF = (NNF1,NNF2)).
+
+  nnf(Lit,_,Lit,1,I,I).
+
+  % -----------------------------------------------------------------
+  %  make_matrix(+Fml,-Matrix)
+  %
+  % Syntax of Fml:
+  %  negation: '~', disj: ';', conj: ',', impl: '=>', eqv: '<=>',
+  %  quant. 'all X:<Formula>', 'ex X:<Formula>' where 'X' is a
+  %  prolog variable.
+  %
+  % Syntax of Matrix:
+  %  Matrix is a list of clauses; a clause is a list of literals.
+  %  Each clause has the form FreeV:Cla where Cla is a list of literals
+  %  and FreeV is a list which contains one tuple [X,P] for each (free)
+  %  variable X with prefix P occuring in Cla. Each literal has the
+  %  form Lit:Pre where Lit is a literal (negation is expressed by '-')
+  %  and Pre is a the prefix of Lit.
+  %
+  % Example: make_matrix(ex Y: (all X: ((p(Y) => p(X))) ),Matrix).
+  %          Matrix = [[[X1, []]] : [(-(p(X1))) : -([1^[X1], 2^[X1]])],
+  %                   [] : [p(1^[X1]^[1^[X1]]) : [1^[X1], 2^[X1]]]]
+
+  make_matrix_intu(Fml,Matrix) :-
+      univar(Fml,[],Fml1), nnf(Fml1,NNF), dnf(NNF,DNF),
+      mat(DNF,Matrix1), matvar(Matrix1,Matrix).
+
+  % -----------------------------------------------------------------
+  %  dnf(+NNF,-DNF)
+  %
+  % Syntax of NNF, DNF: negation: '-', disj: ';', conj: ','.
+  %
+  % Example: dnf(((p:[] ; (-(p)):[1^[]]), (q:[] ; (-(q)):[2^[]])),DNF).
+  %          DNF = (p:[], q:[] ; p:[], (-(q)):[2^[]]) ;
+  %                (-(p)):[1^[]], q:[] ; (-(p)):[1^[]], (-(q)):[2^[]]
+
+  dnf(((A;B),C),(F1;F2)) :- !, dnf((A,C),F1), dnf((B,C),F2).
+  dnf((A,(B;C)),(F1;F2)) :- !, dnf((A,B),F1), dnf((A,C),F2).
+  dnf((A,B),F) :- !, dnf(A,A1), dnf(B,B1),
+      ( (A1=(C;D);B1=(C;D)) -> dnf((A1,B1),F) ; F=(A1,B1) ).
+  dnf((A;B),(A1;B1)) :- !, dnf(A,A1), dnf(B,B1).
+  dnf(Lit,Lit).
+
+  % -----------------------------------------------------------------
+  %  mat(+DNF,-Matrix)
+  %
+  % Syntax of DNF,Matrix: See above.
+  %
+  % Example:  mat(((p:[], q:[] ; p:[], (-(q)):[2^[]]) ; (-(p)):[1^[]],
+  %                q:[] ; (-(p)):[1^[]], (-(q)):[2^[]]),Matrix).
+  %           Matrix = [[p:[], q:[]], [p:[], (-(q)): -([2^[]])],
+  %                     [(-(p)): -([1^[]]), q:[]],
+  %                     [(-(p)): -([1^[]]), (-(q)): -([2^[]])]]
+
+  mat((A;B),M) :- !, mat(A,MA), mat(B,MB), append(MA,MB,M).
+  mat((A,B),M) :- !,
+      ( mat(A,[CA]), mat(B,[CB]) -> union2(CA,CB,M) ; M=[] ).
+  mat(-(Lit):Pre,[[-(Lit):(-Pre)]]) :- !.
+  mat(Lit:Pre,[[Lit:Pre]]).
+
+  % -----------------------------------------------------------------
+  %  univar(+Fml,+Var,-Fml1)
+  %
+  % Fml is a first-order formula and Fml1 is equivalent to Fml where
+  % all variables in Fml have been replaced with unique variable names
+  % (Var is the list of variables which have been collected so far)
+  %
+  % Syntax of Fml, Fml1: See above.
+  %
+  % Example: univar((all X:(p(X),ex X:q(X))),[],Fml1).
+  %          Fml1 = all X1 : (p(X1), ex X2 : q(X2))
+
+  univar(Fml,_,Fml)    :- (atomic(Fml);var(Fml);Fml==[[]]), !.
+
+  univar(Fml,Var,Fml1) :-
+      Fml=..[Op,Arg|ArgL],
+      ( (Op=ex;Op=all) -> Arg=X:F, delete2(Var,X,Var1),
+                          copy_term((X,F,Var1),(Y,F1,Var1)),
+                          univar(F1,[Y|Var],F2), Fml1=..[Op,Y:F2]
+                          ;
+                          univar(Arg,Var,Arg1), univar(ArgL,Var,ArgL1),
+                          Fml1=..[Op,Arg1|ArgL1] ).
+
+  % -----------------------------------------------------------------
+  %  union2/member2  (realizes MULT/TAUT reductions)
+
+  union2([],L,[L]).
+  union2([X|L1],L2,M)    :- member2(X,L2), !, union2(L1,L2,M).
+  union2([X:Pre|_],L2,M) :- (-(Xn):(-Pr)=X:Pre;-(X):(-Pre)=Xn:Pr) ->
+                            member2(Xn:Pr,L2), !, M=[].
+  union2([X|L1],L2,M)    :- union2(L1,[X|L2],M).
+
+  member2(X,[Y|_]) :- X==Y, !.
+  member2(X,[_|T]) :- member2(X,T).
+
+  % -----------------------------------------------------------------
+  %  delete2 (deletes variable from list)
+
+  delete2([],_,[]).
+  delete2([X|T],Y,T1)     :- X==Y, !, delete2(T,Y,T1).
+  delete2([X|T],Y,[X|T1]) :- delete2(T,Y,T1).
+
+  % -----------------------------------------------------------------
+  %  matvar(+Mat,-Mat1)
+  %
+  % Mat is a matrix and Mat1 is a matrix where each clause Cla of Mat has
+  % been replaced by FreeV:Cla where FreeV is a list which contains one
+  % tuple [X,P] for each (free) variable X with prefix P occuring in Cla
+  %
+  % Syntax of Mat,Mat1: See above.
+  %
+  % Example: matvar([[p(1^[]^[1^[]]):[1^[]], q(X1^[1^[]]):[1^[]]]],Mat1).
+  %          Mat1 = [[[X1,[1^[]]]]:[p(1^[]^[1^[]]):[1^[]], q(X1):[1^[]]]]
+
+  matvar([],[]).
+  matvar([Cla|Mat],[FreeV:Cla1|Mat1]) :-
+      clavar(Cla,Cla1,FreeV), matvar(Mat,Mat1).
+
+  clavar(Fml^Pre,Fml,[[Fml,Pre]]) :- var(Fml), !.
+  clavar(Fml,Fml,[])              :- (atomic(Fml);Fml==[[]];Fml=_^_), !.
+  clavar(Fml:Pre,Fml1:Pre,FreeV)  :- !, clavar(Fml,Fml1,FreeV).
+  clavar(Fml,Fml1,FreeV) :-
+      Fml=..[Op,Arg|ArgL],
+      clavar(Arg,Arg1,FreeV1), clavar(ArgL,ArgL1,FreeV2),
+      union2(FreeV1,FreeV2,[FreeV]), Fml1=..[Op,Arg1|ArgL1].
+  """
+}
+
+load_provers = fn session ->
+  dir = Path.join(System.tmp_dir!(), "swi-livebook-provers-#{System.pid()}")
+  File.mkdir_p!(dir)
+
+  files = Map.merge(prover_sources, %{
+    "leancop.pl" => leancop,
+    "leanhat.pl" => leanhat,
+    "ileancop.pl" => ileancop,
+    "prover_showcase.pl" => diagnostics
+  })
+
+  try do
+    for {file, source} <- files, do: File.write!(Path.join(dir, file), source)
+    SWI.load(session, Path.join(dir, "prover_showcase.pl"))
+  after
+    File.rm_rf!(dir)
+  end
 end
 
-{:ok, session} = SWI.start_link(backend: backend)
+verdicts = fn rows, keys ->
+  rows =
+    for row <- rows do
+      Map.update!(row, :result, fn
+        "proved" -> "Proof found"
+        "exhausted" -> "No proof found"
+      end)
+    end
 
-try do
-  :ok = SWI.load(session, Path.join(dir, "prover_showcase.pl"))
-after
-  File.rm_rf!(dir)
+  Kino.DataTable.new(rows,
+    keys: keys,
+    num_rows: length(rows),
+    formatter: fn
+      :__header__, key -> {:ok, key |> Atom.to_string() |> String.replace("_", " ") |> String.capitalize()}
+      :logic, :classical -> {:ok, "Classical"}
+      :logic, :ht -> {:ok, "Here-and-There"}
+      :logic, :intu -> {:ok, "Intuitionistic"}
+      :prover, :leancop -> {:ok, "leanCoP"}
+      :prover, :leanhat -> {:ok, "leanHaT"}
+      :prover, :ileancop -> {:ok, "ileanCoP"}
+      _, _ -> :default
+    end
+  )
 end
-```
 
-To switch, run the final close cell and rerun from here. With NIF, run one
-prover experiment at a time because the diagnostics use shared predicates.
-
-## Follow a quantified function chain
-
-### What you will learn
-
-Separate the formula you ask about from the prover that searches for its proof.
-Our assumptions are `p(a)` and `∀x(p(x) → p(f(x)))`. Repeatedly applying the
-second assumption should establish `p(f(f(f(f(a)))))`.
-
-| Syntax              | Meaning                                  |
-| ------------------- | ---------------------------------------- |
-| `A,B`               | conjunction                              |
-| `A;B`               | disjunction                              |
-| `A=>B`              | implication                              |
-| `~A`                | negation                                 |
-| `all X:A`, `ex X:A` | universal and existential quantification |
-
-Start at `p(a)`. Substituting `a` for `X` yields `p(f(a))`. What must you
-substitute next? Generate the question in Elixir and let Prolog find the proof.
-
-```elixir
 chain = fn steps ->
-  term = Enum.reduce(1..steps, "a", fn _, term -> "f(#{term})" end)
+  term = Enum.reduce(1..steps//1, "a", fn _, term -> "f(#{term})" end)
   "(p(a),(all X:(p(X)=>p(f(X)))))=>p(#{term})"
 end
 
-four_steps = chain.(4)
-Kino.Text.new(four_steps)
-```
 
-Run the same formula through leanHaT in Here-and-There (HT) logic and through
-nanoCoP in HT and intuitionistic logic. Every run checks its expected verdict
-and records positive kernel call and inference counts.
-
-```elixir
-prove = fn prover, logic, formula ->
-  text = :json.encode(formula) |> IO.iodata_to_binary()
-  goal = "prover_showcase:run(#{prover},#{logic},#{text},Result,Calls,Inferences,Proof)"
-  [answer] = SWI.query(session, goal) |> Enum.to_list()
-  assert answer["Calls"] > 0
-  assert answer["Inferences"] > 0
-  answer
-end
-
-run = fn name, prover, logic, formula, expected ->
-  answer = prove.(prover, logic, formula)
-  assert answer["Result"] == {:atom, expected}
-  if prover == :nanocop and expected == "proved", do: assert(answer["Proof"] != [])
-
-  %{
-    problem: name,
-    prover: prover,
-    logic: logic,
-    result: expected,
-    kernel_calls: answer["Calls"],
-    inferences: answer["Inferences"]
-  }
-end
-
-chain_results =
-  for {prover, logic} <- [leanhat: :ht, nanocop: :ht, nanocop: :intu] do
-    run.("Function chain 4", prover, logic, four_steps, "proved")
-  end
-
-Kino.DataTable.new(chain_results)
-```
-
-The 20-step version gives the prover a longer chain. We run it in nanoCoP's
-intuitionistic mode; HT search can be much more expensive on this family.
-
-```elixir
-long_chain = run.("Function chain 20", :nanocop, :intu, chain.(20), "proved")
-Kino.DataTable.new([long_chain])
-```
-
-### Try it yourself
-
-Change four steps to six. Predict whether the verdict or only the search work
-should change. Update the displayed label when changing the formula.
-
-<details>
-<summary>Hint and expected result</summary>
-
-The universal implication can be instantiated again at every step. The formula
-still has a constructive proof. Calls and elapsed work can change substantially;
-a timeout would mean the run is inconclusive.
-
-</details>
-
-## Prove a finite pigeonhole principle
-
-Four pigeons each occupy one of three holes. Some pair must share a hole.
-`o12` means pigeon 1 occupies hole 2. The antecedent states the alternatives
-for every pigeon; the consequent lists all possible pair collisions.
-
-For one hole, six pairs of pigeons could collide. Before reading the loop,
-work out why three holes give eighteen candidate collisions.
-
-```elixir
 pigeonhole = fn holes ->
   placements =
     for pigeon <- 1..(holes + 1) do
@@ -266,101 +1162,181 @@ pigeonhole = fn holes ->
   "(" <> Enum.join(placements, ",") <> ")=>(" <> Enum.join(collisions, ";") <> ")"
 end
 
-pigeon_formula = pigeonhole.(3)
-Kino.Text.new(pigeon_formula)
+Kino.nothing()
 ```
 
+## Introduction
+
+If you know that `p` implies `q` and you know that `p` holds, you can
+conclude `q`. In this notebook, you give that reasoning to a theorem
+prover as a formula. It searches for a proof under the rules of the
+chosen logic.
+
+An ordinary Prolog query such as `member(X, [1, 2])` asks which values fit
+`X`. A prover asks whether a conclusion follows from assumptions. It
+doesn't need any Prolog facts named `p` or `q`.
+
+Run **Setup**, then work down one cell at a time. Start a SWI session
+with `SWI.start_link/1`. The loader calls `SWI.load/2` to bring the provers
+into that session. Keep `:port` for a separate SWI process or
+use `:nif` to run SWI inside Livebook. The calls are the same either way.
+
 ```elixir
-pigeon_results =
-  for logic <- [:ht, :intu] do
-    run.("Four pigeons, three holes", :nanocop, logic, pigeon_formula, "proved")
+backend = :port
+{:ok, session} = SWI.start_link(backend: backend)
+:ok = load_provers.(session)
+```
+
+The lesson uses [leanCoP 2.1(b)](https://www.leancop.de/leancopS.html#leancop21)
+for classical logic, [leanHaT](https://leancop.de/leanhat/) for Here-and-There,
+and [ileanCoP 1.0](https://www.leancop.de/ileancop/) for intuitionistic logic.
+
+To run a prover, pass its name, the logic, and the formula as a quoted
+string in a Prolog query. The reply binds `Result` to the verdict
+and `Calls` to the number of calls to the prover's search predicate.
+
+```elixir
+provers = [leancop: :classical, leanhat: :ht, ileancop: :intu]
+
+prove = fn session, prover, logic, formula ->
+  text = quote_text.(formula)
+  goal = "prover_showcase:run(#{prover}, #{logic}, #{text}, Result, Calls)"
+  [answer] = SWI.query(session, goal) |> Enum.to_list()
+  {:atom, result} = answer["Result"]
+
+  %{formula: formula, prover: prover, logic: logic, result: result, search_calls: answer["Calls"]}
+end
+
+Kino.nothing()
+```
+
+## Take away an assumption
+
+Read `=>` as “implies” and `,` as “and.” The outer `=>` separates the
+assumptions on the left from the conclusion on the right.
+
+| Formula         | Question                                               |
+| --------------- | ------------------------------------------------------ |
+| `((p=>q),p)=>q` | If `p` implies `q` and `p` holds, must `q` hold?       |
+| `(p=>q)=>q`     | If all we know is that `p` implies `q`, must `q` hold? |
+
+Predict both answers, then give the two formulas to the prover. The
+setting `:intu` selects intuitionistic logic. In this example you only
+need its rule that lets you apply `p=>q` when `p` is given.
+
+```elixir
+formulas = ["((p=>q),p)=>q", "(p=>q)=>q"]
+
+first_results = for formula <- formulas, do: prove.(session, :ileancop, :intu, formula)
+verdicts.(first_results, [:formula, :result])
+```
+
+The first formula has a proof. For the second, imagine `p` and `q` are
+both false. Then `p=>q` holds, and `q` still fails. This case shows why the
+conclusion doesn't follow. The table reports the prover's search outcome.
+In general, “No proof found” means the search stopped without a proof.
+If a search times out, the question remains open.
+
+## Repeat the same step
+
+Start with `p(a)` and a rule that applies for every `X`. If `p(X)`
+holds, then `p(f(X))` holds. Write “for every `X`” as `all X:`.
+
+Choose `X = a` to get `p(f(a))`. Then choose `X = f(a)` to get
+`p(f(f(a)))`. Each step wraps another `f` around the term. Predict the
+conclusion after four steps.
+
+```elixir
+steps = 4
+chain_formula = chain.(steps)
+
+chain_results =
+  for {prover, logic} <- provers do
+    prove.(session, prover, logic, chain_formula)
   end
 
-Kino.DataTable.new(pigeon_results)
+verdicts.(chain_results, [:formula, :prover, :logic, :result, :search_calls])
 ```
 
-## Compare two logics
+All three provers can apply the rule repeatedly. Change `steps` to `6` and
+compare the conclusion and verdict. The count includes attempts on failed
+branches. One search call can do different amounts of work in different
+provers.
 
-HT and intuitionistic logic do not prove exactly the same formulas. Start
-with prelinearity: could you construct a proof of either implication without
-knowing anything about `p` or `q`? Compare that with excluded middle, which
-fails in both logics here.
+## Show that two pigeons share a hole
+
+Three pigeons choose among two holes. They can't each have a hole to
+themselves. The formula uses `o12` for “pigeon 1 occupies hole 2” and
+`;` for “or.”
+
+* The left side says every pigeon occupies a hole. For pigeon 1, this
+  is `(o11;o12)`.
+* The right side lists all the ways two pigeons could share a hole.
+  For example, `(o12,o32)` says pigeons 1 and 3 share hole 2.
+
+The cell builds that question from the number of holes. Read the
+generated formula from left to right and find both fragments.
 
 ```elixir
-logic_cases = [
-  %{name: "Prelinearity", formula: "(p=>q);(q=>p)", ht: "proved", intu: "exhausted"},
-  %{
-    name: "Quantified witness",
-    formula: "ex Y:all X:(p(Y)=>p(X))",
-    ht: "proved",
-    intu: "exhausted"
-  },
-  %{name: "Excluded middle", formula: "p; ~p", ht: "exhausted", intu: "exhausted"},
-  %{
-    name: "Double-negation elimination",
-    formula: "(~ ~p)=>p",
-    ht: "exhausted",
-    intu: "exhausted"
-  }
+holes = 2
+pigeon_formula = pigeonhole.(holes)
+
+pigeon_results =
+  for {prover, logic} <- provers, do: prove.(session, prover, logic, pigeon_formula)
+
+Kino.Layout.grid(
+  [
+    Kino.Text.new(pigeon_formula),
+    verdicts.(pigeon_results, [:prover, :logic, :result])
+  ],
+  columns: 1
+)
+```
+
+Try `holes = 3` with leanCoP by replacing `provers` in this loop with
+`[leancop: :classical]`. How many pigeons and candidate pairs are there now?
+
+## Ask the same question in three logics
+
+So far, the provers agreed. Try `p; ~p`, meaning “`p` or not `p`.”
+In classical logic, `p` is true or false, so one side must hold. In
+Here-and-There, `p` can first become true at *there*. At *here*, `p`
+doesn't hold yet, and `~p` fails because `p` holds later. The same
+two-stage example works against the formula in intuitionistic logic.
+
+```elixir
+logic_questions = [
+  "p; ~p",
+  "(~ ~p)=>p",
+  "(p=>q);(q=>p)",
+  "ex Y:all X:(p(Y)=>p(X))"
 ]
 
 logic_results =
-  for example <- logic_cases,
-      {prover, logic} <- [leanhat: :ht, nanocop: :ht, nanocop: :intu] do
-    run.(example.name, prover, logic, example.formula, Map.fetch!(example, logic))
+  for formula <- logic_questions,
+      {prover, logic} <- provers do
+    prove.(session, prover, logic, formula)
   end
 
-Kino.DataTable.new(logic_results)
+verdicts.(logic_results, [:formula, :prover, :logic, :result])
 ```
 
-`proved` means the invoked prover found a proof. `exhausted` means that its
-search returned without one. The negative examples above have independent
-countermodels; failure on an arbitrary new formula is not a general invalidity
-test. nanoCoP's HT embedding is incomplete. A timeout raises `SWI.Error` and
-leaves the logical verdict **unknown**; none is accepted as a passing result.
+Find the rows for `(p=>q);(q=>p)`. To make both implications fail,
+one stage needs only `p` and another needs only `q`. In Here-and-There,
+*here* comes before *there* and truths persist, so the two stages
+can't disagree in both directions. Intuitionistic stages can branch,
+with only `p` on one branch and only `q` on the other.
 
-## Inspect a returned proof
-
-nanoCoP can return its actual connection proof term through the wrapper.
-Here we display an intuitionistic chain proof, so it concerns the formula
-shown above directly. HT mode proves an intuitionistic translation instead.
-The notebook displays the term without independently checking the certificate.
-
-```elixir
-proof = prove.(:nanocop, :intu, four_steps)
-assert proof["Proof"] != []
-Kino.Text.new(inspect(proof["Proof"], pretty: true, limit: :infinity))
-```
-
-leanHaT exposes success here; its search-bound argument is not a proof object.
-The following table asks SWI where the real recursive kernels were loaded.
-
-```elixir
-kernels =
-  for {prover, expected} <- [leanhat: "leanhat_swi.pl", nanocop: "nanocopi20_swi.pl"] do
-    [row] =
-      SWI.query(session, "prover_showcase:source(#{prover},File,Line)") |> Enum.to_list()
-
-    {:atom, file} = row["File"]
-    assert Path.basename(file) == expected
-    %{prover: prover, loaded_kernel: Path.basename(file)}
-  end
-
-Kino.DataTable.new(kernels)
-```
-
-Kernel counts demonstrate execution. They include failed branches; inference
-counts also include parsing, preprocessing, and diagnostics. They are not an
-independent soundness check or a performance comparison without instrumentation.
+`ex Y:` means “there exists a `Y`” and `~` means “not.” Which provers
+can show that ruling out “not `p`” is enough to establish `p`?
 
 ## Close the session
+
+To try the other backend, close the session, change `backend`, then
+rerun the examples.
 
 ```elixir
 :ok = SWI.stop(session)
 ```
 
-## Choose your next step
-
-* [Backend comparison](04_backends.livemd): measure adapter calls without instrumentation.
-* [Metagol](05_metagol.livemd): ask a learner to produce a Prolog program.
-* [All chapters](intro.livemd).
+[Learn a program from examples with Metagol](05_metagol.livemd) · [All chapters](intro.livemd)

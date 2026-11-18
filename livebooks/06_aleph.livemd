@@ -1,4 +1,4 @@
-# Aleph: discover a relational rule, then watch it overfit
+# Aleph: learn a rule and test it on new examples
 
 ```elixir
 Mix.install([
@@ -8,65 +8,22 @@ Mix.install([
 
 project = Path.join(Mix.install_project_dir(), "deps/swi_elixir")
 
-Kino.nothing()
-```
-
-## Introduction
-
-A train has several cars, and each car has properties. Can a learner explain
-which trains are eastbound? Does its rule work on a train it has never seen?
-This chapter uses the real [Aleph learner](https://github.com/friguzzi/aleph)
-to discover a relational classifier, deliberately force memorization, and
-learn recursive list membership.
-
-Choose **Evaluate all** in Standalone. [All chapters and setup help](intro.livemd).
-
-* [Preliminaries](#preliminaries-prepare-a-learning-experiment)
-* [Read the language bias](#read-the-language-bias)
-* [Describe the trains](#describe-the-trains)
-* [Inspect saturation and induction](#inspect-saturation-and-induction)
-* [Detect overfitting](#detect-overfitting)
-* [Learn a recursive program](#learn-a-recursive-program)
-
-## Preliminaries: prepare a learning experiment
-
-Pick `:port` or `:nif` below. Each call to `learn` opens and closes its own
-session. To switch, change `backend` and rerun the experiment. The calls and
-results work the same way.
-
-```elixir
-import ExUnit.Assertions
 Code.require_file(Path.join(project, "examples/ilp.exs"))
-backend = :port
-```
 
-### What the harness does
-
-The harness below loads Aleph, calls saturation and reduction before induction,
-then runs the learned clauses against the examples. The learner itself is a
-vendored library. Focus on the mode declarations and examples on your first pass.
-
-```elixir
 engine = Path.join(project, "vendor/aleph/aleph.pl")
 engine_import = ":- use_module(" <> IO.iodata_to_binary(:json.encode(engine)) <> ")."
 
 adapter = ~S"""
-:- module(aleph_ilp, [learn_task/9]).
+:- module(aleph_ilp, [learn_task/8]).
 """ <> engine_import <> "\n" <> ~S"""
 :- use_module(ilp_support).
 
 lesson(trains, aleph_trains, eastbound(_)).
 lesson(membership, aleph_membership, mem(_,_)).
-tests(trains,
- [eastbound(probe_yes)-true, eastbound(probe_long)-false,
-  eastbound(probe_open)-false, eastbound(probe_split)-false]).
-tests(membership,
- [mem(z,[a,b,c,d,e,z])-true, mem(z,[a,b,c])-false,
-  mem(a,[])-false, mem(a,[a,a])-true]).
 
 % Re-read the task for each experiment: Aleph consumes examples and updates its
 % background during induction. Serialize reconsult/search in the shared NIF VM.
-learn_task(Task, Length, ProgramText, Rows, Clauses, BottomText, ReducedText, Trace, Path) :-
+learn_task(Task, Length, ProgramText, Rows, Clauses, Trace, Path, Tests) :-
     must_be(integer, Length), between(1,6,Length),
     lesson(Task, Module, Target),
     with_mutex(aleph_ilp,
@@ -75,12 +32,10 @@ learn_task(Task, Length, ProgramText, Rows, Clauses, BottomText, ReducedText, Tr
         with_output_to(string(Trace),
         (Module:aleph_set(clauselength, Length),
          Module:aleph_set(noise, 0), Module:aleph_set(nodes, 5000),
-         once(Module:sat(1)), Module:bottom(Bottom), program_text([Bottom], BottomText),
-         once(Module:reduce(Reduced)), program_text([Reduced], ReducedText),
          once(Module:induce(Program)),
          length(Program, Clauses), program_text(Program, ProgramText),
          findall(P, Module:example(_,pos,P), Pos),
-         findall(N, Module:example(_,neg,N), Neg), tests(Task, Tests),
+         findall(N, Module:example(_,neg,N), Neg),
          evaluate(Module, Pos, Neg, Tests, Rows))),
         cleanup(Module, Target))).
 
@@ -99,12 +54,7 @@ cleanup(Module, Target) :-
             clause(Module:Head, _, Ref), \+ clause_property(Ref, file(_))),
            erase(Ref)).
 """
-```
 
-The scorer runs each query and records expected versus actual success. A
-clause reference lets us remove only the learned clauses after scoring.
-
-```elixir
 evaluation = ~S"""
 % Project-authored display and evaluation helpers; no learning algorithm here.
 :- module(ilp_support, [program_text/2, evaluate/5, with_program/3]).
@@ -130,10 +80,8 @@ example(Pos, _, _, train, Goal, true) :- member(Goal, Pos).
 example(_, Neg, _, train, Goal, false) :- member(Goal, Neg).
 example(_, _, Tests, test, Goal, Expected) :- member(Goal-Expected, Tests).
 """
-```
 
-```elixir
-learn = fn task, limit, source, selected ->
+learn = fn task, limit, source, checks, selected ->
   file = if task == :trains, do: "aleph_trains.pl", else: "aleph_membership.pl"
   [module, body] = String.split(source, "\n", parts: 2)
   task_source = Enum.join([module, engine_import, body], "\n")
@@ -147,66 +95,17 @@ learn = fn task, limit, source, selected ->
   ILPShowcase.run_inline(selected, files, ["aleph_ilp.pl"], fn directory ->
     path = :json.encode(Path.join(directory, file)) |> IO.iodata_to_binary()
 
+    tests = Enum.map_join(checks, ",", fn {goal, expected} -> "#{goal}-#{expected}" end)
+
     """
     statistics(inferences, Before),
-    aleph_ilp:learn_task(#{task}, #{limit}, Program, Rows, Clauses, Bottom, Reduced, Trace, #{path}),
+    aleph_ilp:learn_task(#{task}, #{limit}, Program, Rows, Clauses, Trace, #{path}, [#{tests}]),
     statistics(inferences, After),
     Inferences is After - Before
     """
   end)
 end
-```
 
-Each run reloads its examples and removes the learned clauses afterward. With
-NIF, run one experiment at a time because Aleph's state is shared.
-
-## Understand Aleph's search
-
-Aleph chooses an uncovered positive example, saturates it to construct a
-**bottom clause**, searches for a useful generalization, and adds a selected
-clause to the theory. It repeats until its positive examples are covered.
-A bottom clause is a detailed explanation under the language bias; a good
-final rule usually needs only a few of those literals.
-
-```elixir
-Kino.Mermaid.new("""
-flowchart LR
-  E["Choose uncovered positive"] --> B["Build bottom clause"]
-  B --> S["Search generalizations"]
-  S --> H["Add selected clause"]
-  H --> R{"Positives left?"}
-  R -->|yes| E
-  R -->|no| T["Return theory"]
-""")
-```
-
-This is a greedy induction procedure, not a guarantee of a globally best theory.
-
-## Read the language bias
-
-### What you will learn
-
-Express a relation between a train and **one particular car**. The mode
-declarations control which variables and literals Aleph can introduce.
-
-| Notation | Role |
-| --- | --- |
-| `modeh` | Permitted clause head |
-| `modeb` | Permitted body literal |
-| `+train`, `+car` | Input variable of the indicated type |
-| `-car` | Output variable introduced by a literal |
-| `#shape`, `#int` | Constant selected from a type |
-| `1`, `*` | Recall bound, not predicate arity |
-| `determination/2` | Permitted explanatory predicate for the target |
-
-This first part of our task declares a module and the complete language bias.
-The `learn` cell above adds Aleph's import to the task before SWI loads it.
-The modes and training examples are all below.
-
-Read `has_car(+train,-car)` as “given a train, introduce a car.” The learner
-can then use that car as the input to `short(+car)` and `closed(+car)`.
-
-```elixir
 train_bias = ~S"""
 :- module(aleph_trains, []).
 
@@ -215,42 +114,21 @@ train_bias = ~S"""
 :- aleph_set(i,2).
 
 :- modeh(1,eastbound(+train)).
-:- modeb(1,short(+car)).
-:- modeb(1,closed(+car)).
-:- modeb(1,long(+car)).
-:- modeb(1,open_car(+car)).
-:- modeb(1,double(+car)).
-:- modeb(1,jagged(+car)).
-:- modeb(1,shape(+car,#shape)).
-:- modeb(1,load(+car,#shape,#int)).
-:- modeb(1,wheels(+car,#int)).
-:- modeb(*,has_car(+train,-car)).
-
-:- determination(eastbound/1,short/1).
-:- determination(eastbound/1,closed/1).
-:- determination(eastbound/1,long/1).
-:- determination(eastbound/1,open_car/1).
-:- determination(eastbound/1,double/1).
-:- determination(eastbound/1,jagged/1).
-:- determination(eastbound/1,shape/2).
-:- determination(eastbound/1,wheels/2).
-:- determination(eastbound/1,has_car/2).
-:- determination(eastbound/1,load/3).
 """
-```
 
-## Describe the trains
+train_modes = [
+  short: ["+car"],
+  closed: ["+car"],
+  long: ["+car"],
+  open_car: ["+car"],
+  double: ["+car"],
+  jagged: ["+car"],
+  shape: ["+car", "#shape"],
+  load: ["+car", "#shape", "#int"],
+  wheels: ["+car", "#int"],
+  has_car: ["+train", "-car"]
+]
 
-The background supplies ten trains and all their cars. Length, shape, load,
-wheel count, and open/closed status are ordinary relational facts. Distractor
-features remain available to the learner.
-
-The four `probe_*` trains at the end are project-authored diagnostic structures.
-Their background facts are visible, but their labels never enter training.
-This is the full background used in the experiment, so you can inspect or edit
-any fact before learning.
-
-```elixir
 train_background = ~S"""
 car(car_11). car(car_12). car(car_13). car(car_14). car(car_21). car(car_22). car(car_23).
 car(car_31). car(car_32). car(car_33). car(car_41). car(car_42). car(car_43). car(car_44).
@@ -325,160 +203,10 @@ shape(car_101,u_shaped). shape(car_102,rectangle). open_car(car_101). open_car(c
 load(car_101,rectangle,1). load(car_102,rectangle,2). wheels(car_101,2).
 wheels(car_102,2).
 
-train(probe_yes). train(probe_long). train(probe_open). train(probe_split). car(probe_y).
-car(probe_l). car(probe_o). car(probe_s1). car(probe_s2). has_car(probe_yes,probe_y).
-short(probe_y). closed(probe_y). has_car(probe_long,probe_l). long(probe_l).
-closed(probe_l). has_car(probe_open,probe_o). short(probe_o). open_car(probe_o).
-has_car(probe_split,probe_s1). short(probe_s1). open_car(probe_s1).
-has_car(probe_split,probe_s2). long(probe_s2). closed(probe_s2).
-"""
-```
-
-The training set has five positives and five negatives. Aleph's source markers
-separate these labels from the background.
-
-```elixir
-train_labels = ~S"""
-:-begin_in_pos.
-eastbound(east1).
-eastbound(east2).
-eastbound(east3).
-eastbound(east4).
-eastbound(east5).
-:-end_in_pos.
-:-begin_in_neg.
-eastbound(west6).
-eastbound(west7).
-eastbound(west8).
-eastbound(west9).
-eastbound(west10).
-:-end_in_neg.
 """
 
-trains_source =
-  train_bias <>
-    "\n:-begin_bg.\n" <>
-    train_background <>
-    "\n:-end_bg.\n" <> train_labels
-```
-
-## Inspect saturation and induction
-
-Before running, name a property that should hold of the **same car**, rather
-than independent properties of a train's different cars.
-
-```elixir
-trains = learn.(:trains, 4, trains_source, backend) |> ILPShowcase.check!()
-assert trains["Clauses"] == 1
-Kino.Text.new(trains["Program"])
-```
-
-The same variable should appear in `has_car`, `short`, and `closed`.
-Inspect Aleph's public `sat(1)`, `bottom/1`, and `reduce/1` results alongside
-the final `induce/1` theory. These are actual returned terms, not expected
-answers pasted into the notebook.
-
-```elixir
-Kino.Layout.grid(
-  [
-    Kino.Text.new("BOTTOM CLAUSE\n" <> trains["Bottom"]),
-    Kino.Text.new("REDUCED CLAUSE\n" <> trains["Reduced"]),
-    Kino.Text.new("INDUCED THEORY\n" <> trains["Program"])
-  ],
-  columns: 1
-)
-```
-
-```elixir
-Kino.DataTable.new(ILPShowcase.scores(trains))
-```
-
-Search trace output is captured in `trains["Trace"]`; display it with
-`Kino.Text.new/1` if you want Aleph's search history.
-
-## Test the meaning of a shared variable
-
-These probes test the intended short-and-closed concept. They are diagnostic
-examples, not a random test split or an independent benchmark.
-
-| Train | Cars | Expected eastbound? |
-| --- | --- | --- |
-| `probe_yes` | one short, closed car | yes |
-| `probe_long` | one long, closed car | no |
-| `probe_open` | one short, open car | no |
-| `probe_split` | a short/open car and a long/closed car | no |
-
-The split case catches a plausible wrong rule: “some car is short and some
-car is closed.” The intended rule requires both properties of the same car.
-
-```elixir
-probe_rows = Enum.filter(trains["Rows"], &(&1.split == "test"))
-
-assert %{actual: false, expected: false} =
-         Enum.find(probe_rows, &(&1.goal == "eastbound(probe_split)"))
-
-Kino.DataTable.new(probe_rows, keys: [:goal, :expected, :actual])
-```
-
-### Try it yourself
-
-Change the `probe_split` background so that its short car is also closed.
-Predict the learned theory and the expected label of that probe.
-
-<details>
-<summary>Hint and expected result</summary>
-
-The training labels have not changed, so the intended learned theory is the
-same. That probe now satisfies the concept. Its fixed diagnostic label would
-need updating; the default `check!` correctly rejects the mismatch. Inspect
-the returned rows without `check!` when deliberately changing probe meanings.
-
-</details>
-
-## Detect overfitting
-
-Aleph's `clauselength` counts the head literal. A head plus `has_car`, `short`,
-and `closed` needs a limit of four. At three, that rule is inexpressible, but
-five ground facts can still memorize the positive trains.
-
-```elixir
-memorized = learn.(:trains, 3, trains_source, backend)
-assert memorized["Clauses"] == 5
-[train_score, test_score] = ILPShowcase.scores(memorized)
-assert %{correct: 10, total: 10} = train_score
-assert %{false_negatives: 1, false_positives: 0} = test_score
-Kino.Text.new(memorized["Program"])
-```
-
-Both hypotheses fit training perfectly. Compare their withheld predictions:
-the memorized theory misses the new positive train.
-
-```elixir
-comparison =
-  for {limit, result} <- [{3, memorized}, {4, trains}],
-      score <- ILPShowcase.scores(result) do
-    Map.merge(score, %{max_literals: limit, clauses: result["Clauses"]})
-  end
-
-Kino.DataTable.new(comparison)
-```
-
-The experiments use zero training noise, a 5,000-node search bound, and a
-15-second query budget. A timeout is an unknown outcome, not successful
-learning or evidence that the concept cannot be expressed.
-
-## Learn a recursive program
-
-The second task learns `mem(Element,List)` from 19 positive and six negative
-examples. Its modes allow the target itself in clause bodies and list
-decomposition through equality. The complete task is inline here.
-
-```elixir
 membership_source = ~S"""
 :- module(aleph_membership, []).
-:- if(current_predicate(use_rendering/1)).
-:- use_rendering(prolog).
-:- endif.
 :- aleph.
 
 :- mode(*,mem(+any,+list)).
@@ -494,89 +222,211 @@ membership_source = ~S"""
 :-begin_bg.
 
 :-end_bg.
-:-begin_in_pos.
-mem(0,[0]).
-mem(1,[1]).
-mem(2,[2]).
-mem(3,[3]).
-mem(4,[4]).
-mem(0,[0,0]).
-mem(0,[0,1]).
-mem(0,[0,2]).
-mem(1,[0,1]).
-mem(0,[1,0]).
-mem(0,[2,0]).
-mem(1,[1,1]).
-mem(1,[2,1]).
-mem(1,[1,2]).
-mem(2,[2,2]).
-mem(2,[3,2]).
-mem(2,[2,3]).
-mem(3,[2,3]).
-mem(3,[4,2,3]).
-:-end_in_pos.
-:-begin_in_neg.
-mem(0,[1,2]).
-mem(0,[1]).
-mem(1,[0]).
-mem(3,[]).
-mem(2,[]).
-mem(2,[3]).
-:-end_in_neg.
 """
-```
 
-```elixir
-membership = learn.(:membership, 4, membership_source, backend) |> ILPShowcase.check!()
-assert membership["Clauses"] == 2
-Kino.Text.new(membership["Program"])
-```
+label_source = fn yes, no ->
+  positive = Enum.map_join(yes, "\n", &"#{&1}.")
+  negative = Enum.map_join(no, "\n", &"#{&1}.")
 
-The returned program should have a head-match base case and a recursive tail
-case. Training uses numbers; the diagnostic queries use atoms, longer lists,
-absence, and the empty list. Each recursive call shortens a finite list.
-SWI executes the actual learned clauses when evaluating these queries.
+  """
+  :- begin_in_pos.
+  #{positive}
+  :- end_in_pos.
+  :- begin_in_neg.
+  #{negative}
+  :- end_in_neg.
+  """
+end
 
-```elixir
-Kino.DataTable.new(Enum.filter(membership["Rows"], &(&1.split == "test")),
-  keys: [:goal, :expected, :actual]
-)
-```
+trains_task = fn yes, no, new_trains, features ->
+  declarations =
+    for {name, args} <- train_modes, name in features do
+      recall = if name == :has_car, do: "*", else: "1"
 
-## Compare backends
+      """
+      :- modeb(#{recall}, #{name}(#{Enum.join(args, ",")})).
+      :- determination(eastbound/1, #{name}/#{length(args)}).
+      """
+    end
 
-Check each task against its labels before comparing predictions. The deliberate
-memorization experiment is checked separately for its specific failure pattern.
+  new_facts =
+    Enum.map_join(new_trains, "\n", fn {train, cars, _expected} ->
+      car_facts =
+        cars
+        |> Enum.with_index(1)
+        |> Enum.map_join("\n", fn {{size, cover}, index} ->
+          car = "#{train}_car#{index}"
+          "car(#{car}). has_car(#{train},#{car}). #{size}(#{car}). #{cover}(#{car})."
+        end)
 
-```elixir
-backends =
-  for {task, source} <- [trains: trains_source, membership: membership_source] do
-    port = learn.(task, 4, source, :port) |> ILPShowcase.check!()
-    nif = learn.(task, 4, source, :nif) |> ILPShowcase.check!()
-    assert port["Rows"] == nif["Rows"]
-    assert port["Clauses"] == nif["Clauses"]
-    %{task: task, clauses: port["Clauses"], matching_predictions: true}
+      "train(#{train}).\n#{car_facts}"
+    end)
+
+  train_bias <> Enum.join(declarations) <> "\n:- begin_bg.\n" <> train_background <> "\n" <> new_facts <>
+    "\n:- end_bg.\n" <>
+    label_source.(Enum.map(yes, &"eastbound(#{&1})"), Enum.map(no, &"eastbound(#{&1})"))
+end
+
+
+show = fn result ->
+  program = result["Program"]
+
+  if program == "" do
+    Kino.Text.new("No rule found within this limit.")
+  else
+    {training, checks} = Enum.split_with(result["Rows"], &(&1.split == "train"))
+    matches = Enum.count(training, &(&1.expected == &1.actual))
+
+    rows =
+      for %{goal: goal, expected: expected, actual: actual} <- checks do
+        %{
+          "Example" => goal,
+          "Expected" => if(expected, do: "Yes", else: "No"),
+          "Predicted" => if(actual, do: "Yes", else: "No")
+        }
+      end
+
+    Kino.Layout.grid(
+      [
+        Kino.Text.new(program),
+        Kino.Markdown.new("**Training examples matched:** #{matches} of #{length(training)}"),
+        Kino.DataTable.new(rows, name: "New examples", keys: ["Example", "Expected", "Predicted"])
+      ],
+      columns: 1
+    )
   end
+end
 
-Kino.DataTable.new(backends)
+
+Kino.nothing()
 ```
 
-Counts and timings include saturation, reduction, induction, and diagnostics;
-they are not a pure learner benchmark.
+## Introduction
 
-## Session cleanup
+A train can have several cars. Each car has properties such as length,
+shape, and whether it is open or closed. Can you find a rule that explains
+which trains go east? Give [Aleph](https://github.com/friguzzi/aleph) the
+same clues and see what rule it learns.
 
-Each `learn` call releases its session and removes learned target clauses after
-evaluation. No persistent session needs a final close cell. Reevaluate an edited
-source cell, the cell assembling `trains_source`, and the learning cell to try
-another experiment. Update worked-example checks when changing expected labels.
+Run **Setup**, then work down one cell at a time. Keep `:port` for a separate SWI
+process or choose `:nif` to run SWI inside Livebook.
 
-## Choose your next step
+Choose which facts Aleph may use in a rule. `has_car` lets it find a car
+belonging to a train. `short` and `closed` let it ask two questions about
+that car. Aleph calls declarations about how to use these relations
+**modes**. For instance, `has_car(+train,-car)` starts with a known train
+and introduces a car to examine.
 
-Remove `closed/1` from the determinations and inspect the new theory. Design a
-probe that tests its meaning rather than checking only its training score.
-For membership, remove the recursive determination and predict which longer
-lists a bounded alternative could miss.
+```elixir
+backend = :port
+train_features = ~w(short closed long open_car double jagged shape load wheels has_car)a
+Kino.nothing()
+```
 
-* [Metagol](05_metagol.livemd): compare metarules and predicate invention with Aleph's modes and bottom clauses.
-* [All chapters](intro.livemd).
+The notebook turns this list into mode declarations, loads the facts and
+training labels into SWI, and asks Aleph for a program with `induce(Program)`.
+The checks then run that program on new trains.
+
+## Learn a rule for eastbound trains
+
+Aleph gets facts about ten trains and their cars, plus the direction labels
+below. For example, `east1` has a short, closed car. So does `east2`.
+`west6` has a long, closed car and a different car that is short and open.
+What would a rule need to say to tell these trains apart?
+
+The four checks describe new trains. Each lists the cars with their sizes
+and covers, followed by the expected answer. Look at `probe_split`. It
+has a short car and a closed car. Should it count as eastbound?
+
+```elixir
+eastbound = ~w(east1 east2 east3 east4 east5)
+westbound = ~w(west6 west7 west8 west9 west10)
+
+new_trains = [
+  {:probe_yes, [{:short, :closed}], true},
+  {:probe_long, [{:long, :closed}], false},
+  {:probe_open, [{:short, :open_car}], false},
+  {:probe_split, [{:short, :open_car}, {:long, :closed}], false}
+]
+
+train_checks = for {train, _cars, expected} <- new_trains, do: {"eastbound(#{train})", expected}
+train_source = trains_task.(eastbound, westbound, new_trains, train_features)
+trains = learn.(:trains, 4, train_source, train_checks, backend)
+show.(trains)
+```
+
+Read the learned clause as “a train goes east if it has a car that is short
+and closed.” Prolog uses the **same car variable** for both properties.
+Follow that variable through the rule. Which car would you bind it to
+for `probe_split`? The prediction table shows what happens when SWI runs
+the rule on each example.
+
+**Expected** comes from the labels you supplied for the new trains.
+**Predicted** comes from running the learned program. Try closing the
+short car in `probe_split`. Predict the answer, update its label, and
+rerun the cell. The training labels stay the same.
+
+## See what memorizing looks like
+
+The `4` above limits how many parts can appear in one clause. The eastbound
+rule needs four. It names the target and checks that the train has a car,
+that the car is short, and that the same car is closed.
+
+Reduce the limit to three. Aleph can still remember each eastbound train
+by name. Before running, predict which new train this change will affect.
+
+```elixir
+max_parts = 3
+memorized = learn.(:trains, max_parts, train_source, train_checks, backend)
+show.(memorized)
+```
+
+Compare the two tables. Both programs answer all ten training examples
+correctly. The program made of individual facts misses `probe_yes`. A
+perfect training score can hide a rule that does poorly on new cases.
+This is an example of **overfitting**.
+
+Try changing `max_parts` back to `4`. Which facts does the recovered rule
+use to recognize the new train?
+
+## Learn when a list contains an item
+
+Now give Aleph examples of `mem(Item, List)`. The **yes** examples cover
+items at the start and farther into a list. The **no** examples include
+absent items and empty lists. The learner can split a list into its first
+item and the rest, and it is allowed to call the rule it is learning.
+
+How would you decide whether `z` occurs in `[a,b,c,d,e,z]` if you could
+look at only the first item at each step?
+
+```elixir
+present = [
+  "mem(0,[0])", "mem(1,[1])", "mem(2,[2])", "mem(3,[3])", "mem(4,[4])",
+  "mem(0,[0,0])", "mem(0,[0,1])", "mem(0,[0,2])", "mem(1,[0,1])",
+  "mem(0,[1,0])", "mem(0,[2,0])", "mem(1,[1,1])", "mem(1,[2,1])",
+  "mem(1,[1,2])", "mem(2,[2,2])", "mem(2,[3,2])", "mem(2,[2,3])",
+  "mem(3,[2,3])", "mem(3,[4,2,3])"
+]
+absent = ["mem(0,[1,2])", "mem(0,[1])", "mem(1,[0])", "mem(3,[])", "mem(2,[])", "mem(2,[3])"]
+
+list_checks = [
+  {"mem(z,[a,b,c,d,e,z])", true},
+  {"mem(z,[a,b,c])", false},
+  {"mem(a,[])", false},
+  {"mem(a,[a,a])", true}
+]
+
+list_source = membership_source <> "\n" <> label_source.(present, absent)
+membership = learn.(:membership, 4, list_source, list_checks, backend)
+show.(membership)
+```
+
+Read `[First|Rest]` as “first item, then the rest.” One clause finds the
+item at the front. The other asks the same question of the rest of the list.
+This is **recursion**. Each call works on a shorter list, and both clauses
+fail on the empty list.
+
+Try a check where the target appears twice, or immediately before the end.
+Decide the expected answer before running it.
+
+[Metagol](05_metagol.livemd) · [All chapters](intro.livemd)

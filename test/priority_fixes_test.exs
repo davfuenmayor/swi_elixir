@@ -92,7 +92,8 @@ defmodule SWI.PriorityFixesTest do
       end
 
       test "prover loads and calls preserve ordinary unification flags", %{session: s} do
-        for _ <- 1..2, source <- ["examples/nanocop.pl", "examples/leanhat.pl"] do
+        for _ <- 1..2,
+            source <- ~w(examples/leancop.pl examples/leanhat.pl examples/ileancop.pl) do
           assert :ok = SWI.load(s, source)
           assert {:ok, true} = SWI.call(s, "current_prolog_flag(occurs_check,false)")
           assert {:ok, true} = SWI.call(s, "X=f(X)")
@@ -100,19 +101,19 @@ defmodule SWI.PriorityFixesTest do
 
         assert SWI.call(
                  s,
-                 ~s|set_prolog_flag(occurs_check,false), catch(nanocop:prove_text("(",ht),_,true), current_prolog_flag(occurs_check,false)|
+                 ~s|set_prolog_flag(occurs_check,false), catch(ileancop:prove_text("("),_,true), current_prolog_flag(occurs_check,false)|
                ) == {:ok, true}
 
         for flag <- ["false", "true", "error"] do
           goal =
-            "set_prolog_flag(occurs_check,#{flag}), once(nanocop:prove_text(\"p=>p\",ht)), current_prolog_flag(occurs_check,#{flag})"
+            "set_prolog_flag(occurs_check,#{flag}), ileancop:prove_text(\"p=>p\"), current_prolog_flag(occurs_check,#{flag})"
 
           assert SWI.call(s, goal) == {:ok, true}
         end
 
         assert SWI.call(
                  s,
-                 "set_prolog_flag(occurs_check,false), (nanocop:prove_text(\"p; ~p\",intu) -> fail ; true), current_prolog_flag(occurs_check,false)"
+                 "set_prolog_flag(occurs_check,false), (ileancop:prove_text(\"p; ~p\") -> fail ; true), current_prolog_flag(occurs_check,false)"
                ) == {:ok, true}
       end
 

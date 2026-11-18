@@ -16,7 +16,9 @@ the same loading, calling, and streaming API. This chapter measures startup
 and repeated operations, then demonstrates timeout and crash recovery.
 
 Start with [Getting started](01_basic.livemd) if session ownership is new to
-you. Choose **Evaluate all** in Standalone. [All chapters and setup help](intro.livemd).
+you.
+
+[All chapters and setup help](intro.livemd).
 
 * [Preliminaries](#preliminaries-scope-each-workflow)
 * [Measure startup and the first query](#measure-startup-and-the-first-query)
@@ -228,5 +230,5 @@ retain one session across cells and close it explicitly.
 ## Choose your next step
 
 * [Constraint search](03_search.livemd): control how many answers a search produces.
-* [Metagol](05_metagol.livemd) and [Aleph](06_aleph.livemd): compare programs learned through both backends.
+* [Metagol](05_metagol.livemd) and [Aleph](06_aleph.livemd) learn Prolog rules from examples.
 * [All chapters](intro.livemd).

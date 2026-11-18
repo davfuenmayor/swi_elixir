@@ -55,17 +55,17 @@ defmodule SWI.SessionTest do
 
       test "formula adapters use the same complete-input parser", %{session: s} do
         assert :ok = SWI.load(s, "examples/leanhat.pl")
-        assert :ok = SWI.load(s, "examples/nanocop.pl")
+        assert :ok = SWI.load(s, "examples/ileancop.pl")
 
         for goal <- [
               ~s|leanhat:prove_text("p=>p. fail.")|,
-              ~s|nanocop:prove_text("p=>p. fail.",ht)|
+              ~s|ileancop:prove_text("p=>p. fail.")|
             ] do
           assert {:error, {:prolog, _}} = SWI.call(s, goal)
         end
 
         assert SWI.call(s, ~s|leanhat:prove_text("p=>p.")|) == {:ok, true}
-        assert SWI.call(s, ~s|nanocop:prove_text("p=>p",ht)|) == {:ok, true}
+        assert SWI.call(s, ~s|ileancop:prove_text("p=>p")|) == {:ok, true}
       end
 
       test "failed initialization and directives return load errors", %{session: s} do

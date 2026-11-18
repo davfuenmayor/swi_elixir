@@ -1,4 +1,4 @@
-# Metagol: learn programs that invent, recurse, and compose
+# Metagol: learn a program from examples
 
 ```elixir
 Mix.install([
@@ -8,45 +8,8 @@ Mix.install([
 
 project = Path.join(Mix.install_project_dir(), "deps/swi_elixir")
 
-Kino.nothing()
-```
-
-## Introduction
-
-A few examples go in; a Prolog program comes out. This chapter uses the real
-[Metagol learner](https://github.com/metagol/metagol) to invent a missing
-relation, learn recursion, and transform nested lists. Read each task's
-background and labels, predict a possible rule, then inspect what was learned.
-
-Start with [Getting started](01_basic.livemd) if the wrapper is new to you.
-Choose **Evaluate all** in Standalone. [All chapters and setup help](intro.livemd).
-
-* [Preliminaries](#preliminaries-prepare-a-learning-experiment)
-* [Understand the learning contract](#understand-the-learning-contract)
-* [Invent a missing concept](#invent-a-missing-concept)
-* [Learn recursion](#learn-recursion)
-* [Transform nested lists](#transform-nested-lists)
-* [Compare backends](#compare-backends)
-
-## Preliminaries: prepare a learning experiment
-
-Pick `:port` or `:nif` below. Each call to `learn` opens and closes its own
-session, so you can change `backend` and rerun an experiment. The calls and
-results work the same way.
-
-```elixir
-import ExUnit.Assertions
 Code.require_file(Path.join(project, "examples/ilp.exs"))
-backend = :port
-```
 
-### What the harness does
-
-The harness below declares which shapes a learned clause may take. It then
-calls Metagol and evaluates the resulting clauses. Metagol itself is a
-vendored library. Focus on the four `metarule/4` facts on your first pass.
-
-```elixir
 engine = Path.join(project, "vendor/metagol/metagol.pl")
 engine_import = ":- use_module(" <> IO.iodata_to_binary(:json.encode(engine)) <> ")."
 
@@ -120,12 +83,7 @@ restore_settings(settings(Body, Options, Functional)) :-
     retractall(metagol:functional),
     (Functional == true -> assertz(metagol:functional) ; true).
 """
-```
 
-The scorer runs each query and records expected versus actual success. A
-clause reference lets us remove only the learned clauses after scoring.
-
-```elixir
 evaluation = ~S"""
 % Project-authored display and evaluation helpers; no learning algorithm here.
 :- module(ilp_support, [program_text/2, evaluate/5, with_program/3]).
@@ -151,9 +109,7 @@ example(Pos, _, _, train, Goal, true) :- member(Goal, Pos).
 example(_, Neg, _, train, Goal, false) :- member(Goal, Neg).
 example(_, _, Tests, test, Goal, Expected) :- member(Goal-Expected, Tests).
 """
-```
 
-```elixir
 learn = fn task, budget, source, selected ->
   files = %{
     "ilp_support.pl" => evaluation,
@@ -170,272 +126,237 @@ learn = fn task, budget, source, selected ->
     """
   end)
 end
-```
 
-With NIF, run one experiment at a time because Metagol's settings are shared.
-The final comparison runs both backends for you.
+learn_from_examples = fn target, limit, input, relations, backend ->
+  checks = Enum.map_join(input.checks, ",", fn {goal, expected} -> "#{goal}-#{expected}" end)
 
-## Understand the learning contract
+  source = """
+  :- module(metagol_tasks, [primitives/2, training/3, tests/2]).
+  #{Map.get(input, :facts, "")}
+  primitives(#{target}, [#{Enum.join(relations, ",")}]).
+  training(#{target}, [#{Enum.join(input.yes, ",")}], [#{Enum.join(input.no, ",")}]).
+  tests(#{target}, [#{checks}]).
+  """
 
-Inductive Logic Programming seeks a hypothesis **H** from background knowledge
-**B**, positive examples **E+**, negative examples **E−**, and a language bias.
-A hypothesis must explain the positives and reject the negatives within that
-bias. Passing a small dataset does not prove the hypothesis is universally right.
+  learn.(target, limit, source, backend)
+end
 
-```elixir
-Kino.Mermaid.new("""
-flowchart LR
-  B["Background predicates"] --> M["Metagol search"]
-  E["Positive and negative examples"] --> M
-  R["Metarules and clause budget"] --> M
-  M --> H["Learned Prolog clauses"]
-  H --> T["Execute on withheld queries"]
-""")
-```
 
-Metarules constrain the shape of candidate clauses. In the chain template,
-choosing `Q = parent` and `R = parent` gives two parent steps through the
-same `C`. Metagol chooses predicate symbols as it searches.
+show = fn result ->
+  program = result["Program"]
 
-| Template       | Allowed clause              | Purpose                     |
-| -------------- | --------------------------- | --------------------------- |
-| Identity       | `P(A,B) :- Q(A,B).`         | Reuse a primitive           |
-| Chain          | `P(A,B) :- Q(A,C), R(C,B).` | Compose relations           |
-| Tail recursion | `P(A,B) :- Q(A,C), P(C,B).` | Follow paths                |
-| Higher-order   | `P(A,B) :- Q(A,B,F).`       | Learn an argument predicate |
+  if program == "" do
+    Kino.Text.new("No rule found within this limit.")
+  else
+    {training, checks} = Enum.split_with(result["Rows"], &(&1.split == "train"))
+    matches = Enum.count(training, &(&1.expected == &1.actual))
 
-The task source below selects available primitives and supplies training and
-test cases. Tests are used only after learning; their labels do not constrain
-the learner. Every displayed program is returned by Metagol, converted to
-ordinary clauses, and executed by SWI.
+    rows =
+      for %{goal: goal, expected: expected, actual: actual} <- checks do
+        %{
+          "Example" => goal,
+          "Expected" => if(expected, do: "Yes", else: "No"),
+          "Predicted" => if(actual, do: "Yes", else: "No")
+        }
+      end
 
-## Invent a missing concept
-
-### What you will learn
-
-Learn a relation that needs a reusable intermediate predicate. The task supplies
-`mg_mother/2` and `mg_father/2`, but no `parent/2`. Five positives cover paths
-through both kinds of parent; `grandparent(amy,amelia)` is negative.
-
-Follow Nora → Ivy → Leo by hand. This path is in the background facts, but
-`grandparent(nora,leo)` is absent from the training labels. It checks whether
-the learned rule also works on that path.
-
-```elixir
-grandparent_source = ~S"""
-:- module(metagol_tasks, [primitives/2, training/3, tests/2]).
-
-mg_mother(ann,amy). mg_mother(ann,andy). mg_mother(amy,amelia).
-mg_mother(linda,gavin). mg_mother(nora,ivy).
-mg_father(steve,amy). mg_father(steve,andy). mg_father(gavin,amelia).
-mg_father(andy,spongebob). mg_father(ivy,leo).
-
-primitives(grandparent, [mg_mother/2,mg_father/2]).
-
-training(grandparent,
- [grandparent(ann,amelia),grandparent(steve,amelia),grandparent(ann,spongebob),
-  grandparent(steve,spongebob),grandparent(linda,amelia)],
- [grandparent(amy,amelia)]).
-
-tests(grandparent,
- [grandparent(nora,leo)-true, grandparent(ann,gavin)-false,
-  grandparent(ann,ann)-false]).
-"""
-```
-
-Before running, consider how to cover all mother/father combinations with
-three clauses. What concept would let you reuse the same relation twice?
-
-```elixir
-grandparent = learn.(:grandparent, 3, grandparent_source, backend) |> ILPShowcase.check!()
-assert grandparent["Status"] == {:atom, "learned"}
-assert grandparent["Clauses"] == 3
-Kino.Text.new(grandparent["Program"])
-```
-
-An invented predicate, usually named `grandparent_1`, plays the role of
-**parent**. The name was not supplied as a primitive. Check both training
-and withheld queries in the actual execution report.
-
-```elixir
-Kino.DataTable.new(grandparent["Rows"], keys: [:split, :goal, :expected, :actual])
-```
-
-### Restrict the program budget
-
-Metagol deepens its search by clause count. A budget changes which programs
-are expressible; it is not a number of training iterations.
-
-```elixir
-budgets =
-  for budget <- [2, 3] do
-    result = learn.(:grandparent, budget, grandparent_source, backend)
-    expected = if budget == 2, do: "no_hypothesis", else: "learned"
-    assert result["Status"] == {:atom, expected}
-    %{budget: budget, status: expected, clauses: result["Clauses"]}
+    Kino.Layout.grid(
+      [
+        Kino.Text.new(program),
+        Kino.Markdown.new("**Training examples matched:** #{matches} of #{length(training)}"),
+        Kino.DataTable.new(rows, name: "New examples", keys: ["Example", "Expected", "Predicted"])
+      ],
+      columns: 1
+    )
   end
+end
 
-Kino.DataTable.new(budgets)
+
+Kino.nothing()
 ```
 
-`no_hypothesis` means this bounded search found no consistent program in the
-configured space. A timeout raises `SWI.Error` and is an unknown outcome.
+## Introduction
 
-### Try it yourself
+If you know that Nora is Ivy's mother and Ivy is Leo's father, what makes Nora
+Leo's grandparent? You can work it out from the family facts. In this notebook,
+[Metagol](https://github.com/metagol/metagol) learns a rule that can do the same.
 
-Remove the withheld Nora–Ivy–Leo query from `tests/2`, leaving training unchanged.
-Predict whether this changes the learned program or only its evaluation report.
+Run **Setup**, then work down one cell at a time. Keep `:port` for a separate SWI
+process or choose `:nif` to run SWI inside Livebook.
 
-<details>
-<summary>Hint and expected result</summary>
-
-Test labels are used only after learning. The hypothesis and training scores
-should remain the same, while the report has one fewer test row. Update your
-expected test count if you add a check for it.
-
-</details>
-
-## Learn recursion
-
-A two-clause ancestor program must cover both one edge and paths of arbitrary
-length. This task supplies parent edges and three positive ancestor queries;
-there is no ancestor implementation in the background.
+First choose which relations Metagol can use. For the grandparent task it
+gets mother and father facts. The `/2` means each relation takes two
+arguments. One rule template, called a *metarule*, lets Metagol join
+two relations through a shared person, such as Ivy in the example above.
 
 ```elixir
-ancestor_source = ~S"""
-:- module(metagol_tasks, [primitives/2, training/3, tests/2]).
+backend = :port
 
-mg_parent(queen_victoria,edward_seventh).
-mg_parent(edward_seventh,george_fifth).
-mg_parent(george_fifth,george_sixth).
-mg_parent(george_sixth,elizabeth_second).
-mg_parent(queen_mother,elizabeth_second).
-mg_parent(elizabeth_second,prince_charles).
-mg_parent(prince_philip,prince_charles).
-mg_parent(prince_charles,prince_william).
-mg_parent(prince_charles,prince_harry).
-mg_parent(princess_diana,prince_william).
-mg_parent(princess_diana,prince_harry).
-mg_parent(prince_william,prince_george).
+allowed_relations = %{
+  grandparent: ["mg_mother/2", "mg_father/2"],
+  ancestor: ["mg_parent/2"],
+  droplasts: ["mg_tail/2", "mg_reverse/2"]
+}
 
-primitives(ancestor, [mg_parent/2]).
+train = fn target, examples, max_clauses ->
+  relations = Map.fetch!(allowed_relations, target)
+  learn_from_examples.(target, max_clauses, examples, relations, backend)
+end
 
-training(ancestor,
- [ancestor(elizabeth_second,prince_charles),ancestor(george_sixth,prince_harry),
-  ancestor(queen_mother,prince_william)], []).
-
-tests(ancestor,
- [ancestor(queen_victoria,prince_george)-true,
-  ancestor(princess_diana,prince_george)-true,
-  ancestor(prince_george,queen_victoria)-false, ancestor(queen_victoria,queen_victoria)-false]).
-"""
+Kino.nothing()
 ```
 
-The Queen Victoria–Prince George test path is longer than the training paths.
-Reverse and self queries catch overly permissive hypotheses. These identifiers
-form a toy graph, not a complete genealogy.
+When you call `train`, the notebook loads those relations and settings
+into SWI and calls Metagol's `learn(Yes, No, Program)`. SWI then runs the
+learned program on the examples you saved for checking.
+
+## Learn what a grandparent is
+
+Give Metagol family facts and examples of queries that should answer **yes**
+or **no**. In a fact like `mg_mother(nora,ivy)`, the mother comes first.
+In a query like `grandparent(ann,amelia)`, the proposed grandparent comes first.
+
+Only the `yes` and `no` examples guide learning. The `checks` are questions
+for the learned program to answer afterward. Before running the cell, trace
+the path from Nora to Leo and predict the answer.
+
+Metagol can combine the supplied mother and father relations and name a
+new relation of its own. The number `3` limits the program to three clauses.
 
 ```elixir
-ancestor = learn.(:ancestor, 2, ancestor_source, backend) |> ILPShowcase.check!()
-assert ancestor["Clauses"] == 2
-Kino.Text.new(ancestor["Program"])
+family = %{
+  facts: """
+  mg_mother(ann,amy). mg_mother(ann,andy). mg_mother(amy,amelia).
+  mg_mother(linda,gavin). mg_mother(nora,ivy).
+  mg_father(steve,amy). mg_father(steve,andy). mg_father(gavin,amelia).
+  mg_father(andy,spongebob). mg_father(ivy,leo).
+  """,
+  yes: [
+    "grandparent(ann,amelia)",
+    "grandparent(steve,amelia)",
+    "grandparent(ann,spongebob)",
+    "grandparent(steve,spongebob)",
+    "grandparent(linda,amelia)"
+  ],
+  no: ["grandparent(amy,amelia)"],
+  checks: [
+    {"grandparent(nora,leo)", true},
+    {"grandparent(ann,gavin)", false},
+    {"grandparent(ann,ann)", false}
+  ]
+}
+
+grandparent = train.(:grandparent, family, 3)
+show.(grandparent)
 ```
+
+The first output is the learned Prolog program. Read `:-` as “if” and a
+comma as “and.” Look for the helper called `grandparent_1`. Its two clauses
+say that a mother or a father counts as a parent. The grandparent clause
+uses the helper twice, with the same person in the middle. Metagol introduced
+that helper while learning. This is called **predicate invention**.
+
+Below the rules, you'll see how many training labels the program matches.
+The table shows its answers to the new questions. **Expected** comes from
+the labels you supplied. **Predicted** is the program's answer. Find the
+row for Nora and Leo.
+
+### Give the learner fewer rules
+
+The `3` above is the maximum number of clauses Metagol can use. A clause
+is a rule or a fact. Try the same examples with room for only two clauses.
+Then change `2` back to `3` and rerun this cell.
 
 ```elixir
-Kino.DataTable.new(Enum.filter(ancestor["Rows"], &(&1.split == "test")),
-  keys: [:goal, :expected, :actual]
-)
+max_clauses = 2
+smaller = train.(:grandparent, family, max_clauses)
+show.(smaller)
 ```
 
-## Transform nested lists
+With two clauses, this search finds no rule that fits the examples. The
+three-clause program has room to define both kinds of parent and join two
+parent steps.
 
-Now learn how to remove the last item from **each inner list**. The available
-primitives are tail and reverse. The adapter provides the upstream interpreted
-`map` combinator, allowing Metagol to learn the predicate mapped over each list.
-No drop-last implementation is supplied.
+## Follow a longer family tree
+
+A grandparent is exactly two parent steps away. An ancestor can be one,
+two, or many steps away. Give Metagol some short paths as examples, then
+ask about a longer one. How could a two-clause program describe paths of
+different lengths?
 
 ```elixir
-droplasts_source = ~S"""
-:- module(metagol_tasks, [primitives/2, training/3, tests/2]).
+family_tree = %{
+  facts: """
+  mg_parent(queen_victoria,edward_seventh).
+  mg_parent(edward_seventh,george_fifth).
+  mg_parent(george_fifth,george_sixth).
+  mg_parent(george_sixth,elizabeth_second).
+  mg_parent(queen_mother,elizabeth_second).
+  mg_parent(elizabeth_second,prince_charles).
+  mg_parent(prince_philip,prince_charles).
+  mg_parent(prince_charles,prince_william).
+  mg_parent(prince_charles,prince_harry).
+  mg_parent(princess_diana,prince_william).
+  mg_parent(princess_diana,prince_harry).
+  mg_parent(prince_william,prince_george).
+  """,
+  yes: [
+    "ancestor(elizabeth_second,prince_charles)",
+    "ancestor(george_sixth,prince_harry)",
+    "ancestor(queen_mother,prince_william)"
+  ],
+  no: [],
+  checks: [
+    {"ancestor(queen_victoria,prince_george)", true},
+    {"ancestor(princess_diana,prince_george)", true},
+    {"ancestor(prince_george,queen_victoria)", false},
+    {"ancestor(queen_victoria,queen_victoria)", false}
+  ]
+}
 
-
-
-primitives(droplasts, [mg_tail/2,mg_reverse/2]).
-
-training(droplasts,
- [droplasts([[a,b,c],[d,e,f,g]],[[a,b],[d,e,f]]),
-  droplasts([[h,i],[j,k,l],[m,n,o,p]],[[h],[j,k],[m,n,o]])],
- [droplasts([[a,b,c]],[[b,c]])]).
-
-tests(droplasts,
- [droplasts([[q],[r,s,t,u,v],[]],[[],[r,s,t,u],[]])-false,
-  droplasts([[q],[r,s,t,u,v]],[[],[r,s,t,u]])-true,
-  droplasts([],[])-true, droplasts([[x,y]],[[y]])-false]).
-"""
+ancestor = train.(:ancestor, family_tree, 2)
+show.(ancestor)
 ```
 
-Predict the composition that converts `[a,b,c]` to `[a,b]` using only reverse
-and tail. The learned program must also apply that composition to every sublist.
+One clause handles a direct parent. The other takes one parent step and
+asks the same ancestor question again from there. That repeated call is
+**recursion**. What happens when the question is asked in reverse?
+
+## Apply a rule to each inner list
+
+This time each example pairs an input with a proposed output.
+`droplasts([[a,b,c]],[[b,c]])` is a **no** because dropping the last item
+from `[a,b,c]` should leave `[a,b]`.
+
+Metagol can reverse a list, remove its first item (`mg_tail`), and apply a
+helper to each inner list (`map`). Try combining the first two operations
+by hand before running the cell.
 
 ```elixir
-droplasts = learn.(:droplasts, 3, droplasts_source, backend) |> ILPShowcase.check!()
-assert droplasts["Clauses"] == 3
-Kino.Text.new(droplasts["Program"])
+nested_lists = %{
+  yes: [
+    "droplasts([[a,b,c],[d,e,f,g]],[[a,b],[d,e,f]])",
+    "droplasts([[h,i],[j,k,l],[m,n,o,p]],[[h],[j,k],[m,n,o]])"
+  ],
+  no: ["droplasts([[a,b,c]],[[b,c]])"],
+  checks: [
+    {"droplasts([[q],[r,s,t,u,v],[]],[[],[r,s,t,u],[]])", false},
+    {"droplasts([[q],[r,s,t,u,v]],[[],[r,s,t,u]])", true},
+    {"droplasts([],[])", true},
+    {"droplasts([[x,y]],[[y]])", false}
+  ]
+}
+
+droplasts = train.(:droplasts, nested_lists, 3)
+show.(droplasts)
 ```
 
-```elixir
-Kino.DataTable.new(droplasts["Rows"], keys: [:split, :goal, :expected, :actual])
-```
+Follow the rule for a single list. Reverse `[a,b,c]` to `[c,b,a]`, remove
+`c`, and reverse again to get `[a,b]`. Look for the `map` clause that applies
+this procedure to every inner list. Why does the check with an empty inner
+list fail while the check with an empty outer list succeeds?
 
-The tests include a singleton inner list, a longer unseen list, an empty outer
-list, and a tempting wrong output. Empty **inner** lists lie outside this
-transformation's domain because tail fails on `[]`; the negative case checks
-that behavior explicitly.
+Try adding a check for a singleton inner list. Decide the expected answer
+before running it. Changing a check leaves the training examples as they are.
 
-## Compare backends
-
-First check each learned program against its labels, then compare Port and NIF.
-Agreement alone would allow two identical mistakes to pass. Inference counts
-and times include setup within the learning query and evaluation; they are not
-measurements of the learner alone.
-
-```elixir
-comparisons =
-  for {task, budget, source} <- [
-        {:grandparent, 3, grandparent_source},
-        {:ancestor, 2, ancestor_source},
-        {:droplasts, 3, droplasts_source}
-      ] do
-    port = learn.(task, budget, source, :port) |> ILPShowcase.check!()
-    nif = learn.(task, budget, source, :nif) |> ILPShowcase.check!()
-    assert port["Rows"] == nif["Rows"]
-    assert port["Clauses"] == nif["Clauses"]
-
-    %{
-      task: task,
-      clauses: port["Clauses"],
-      matching_predictions: true,
-      port_inferences: port["Inferences"],
-      nif_inferences: nif["Inferences"]
-    }
-  end
-
-Kino.DataTable.new(comparisons)
-```
-
-## Session cleanup
-
-Every `learn` call closes its session before returning. Learned clauses are
-removed after evaluation; returned program text and row maps remain usable.
-Reevaluate a task cell and its learning cell to try a new dataset. Worked
-examples check their stated answers, so update those checks for experiments
-that deliberately change the labels or budget.
-
-## Choose your next step
-
-Try removing the negative droplasts example and designing a new withheld case
-that distinguishes the intended transformation from a spurious hypothesis.
-Print `droplasts["Trace"]` to inspect Metagol's search history.
-
-* [Aleph](06_aleph.livemd): learn with modes and bottom clauses instead of metarules.
-* [All chapters](intro.livemd).
+[Next: learn to classify trains with Aleph](06_aleph.livemd) · [All chapters](intro.livemd)

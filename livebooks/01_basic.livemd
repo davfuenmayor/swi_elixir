@@ -17,8 +17,6 @@ questions, reading values, loading a program, and releasing resources.
 performs unification and search. Elixir orchestrates the work and displays
 its results.
 
-Choose **Evaluate all** in Standalone. [All chapters and setup help](intro.livemd).
-
 For a tour of proof search, constraint programming, and program learning,
 start with the [tutorial chapters](intro.livemd).
 
@@ -286,7 +284,7 @@ Elixir remain usable. To revisit the lesson, evaluate from the beginning.
 Try adding another branch to the family and predicting the new answers before
 querying. Keep the relation and search in Prolog; use Elixir to consume results.
 
-* [Proof search](02_provers.livemd): run two real provers on quantified formulas.
+* [Proof search](02_provers.livemd) shows how a conclusion follows from assumptions.
 * [Constraint search](03_search.livemd): enumerate and visualize N-queens solutions.
 * [Backend comparison](04_backends.livemd): measure repeated calls and recovery.
 * [All chapters](intro.livemd).

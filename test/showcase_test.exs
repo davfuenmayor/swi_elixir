@@ -25,8 +25,8 @@ defmodule SWI.ShowcaseTest do
       assert answer["Result"] == {:atom, expected}, "#{example.name}: #{prover}/#{logic}"
 
       case {prover, expected} do
-        {:nanocop, "proved"} -> assert [_ | _] = answer["Proof"]
-        {:leanhat, "proved"} -> assert answer["Proof"] == {:atom, "unavailable"}
+        {:leancop, "proved"} -> assert [_ | _] = answer["Proof"]
+        {_, "proved"} -> assert answer["Proof"] == {:atom, "unavailable"}
         {_, "exhausted"} -> assert answer["Proof"] == {:atom, "none"}
       end
 
@@ -37,8 +37,9 @@ defmodule SWI.ShowcaseTest do
   test "reported clauses belong to the unchanged upstream kernels", %{sessions: sessions} do
     for {_, session} <- sessions,
         {prover, path} <- [
+          {:leancop, "vendor/leanCoP/leancop21_swi.pl"},
           {:leanhat, "vendor/leanHaT/leanhat_swi.pl"},
-          {:nanocop, "vendor/nanoCoP-i-HT/nanocopi20_swi.pl"}
+          {:ileancop, "vendor/ileanCoP/ileancop_swi.pl"}
         ] do
       [row] = SWI.query(session, "prover_showcase:source(#{prover},File,Line)") |> Enum.to_list()
       assert {:atom, reported} = row["File"]
@@ -77,22 +78,22 @@ defmodule SWI.ShowcaseTest do
       {:ok, true} =
         SWI.call(
           session,
-          "wrap_predicate(nanocop:prove(_,_,_,_,_,_,_,_,_,_),test_timeout,_,throw(time_limit_exceeded))"
+          "wrap_predicate(ileancop:prove(_,_,_,_,_),test_timeout,_,throw(time_limit_exceeded))"
         )
 
       try do
-        goal = ProverShowcase.goal(:nanocop, :intu, ProverShowcase.chain(4))
+        goal = ProverShowcase.goal(:ileancop, :intu, ProverShowcase.chain(4))
         assert SWI.call(session, goal) == {:error, :timeout}
         assert_unwrapped(session)
       after
-        SWI.call(session, "unwrap_predicate(nanocop:prove/10,test_timeout)")
+        SWI.call(session, "unwrap_predicate(ileancop:prove/5,test_timeout)")
       end
 
       assert {:ok, true} =
-               SWI.call(session, ProverShowcase.goal(:nanocop, :intu, ProverShowcase.chain(4)))
+               SWI.call(session, ProverShowcase.goal(:ileancop, :intu, ProverShowcase.chain(4)))
 
       assert_unwrapped(session)
-      assert {:ok, true} = SWI.call(session, "nanocop:prove_text(\"p=>p\",intu)")
+      assert {:ok, true} = SWI.call(session, "ileancop:prove_text(\"p=>p\")")
     end
   end
 

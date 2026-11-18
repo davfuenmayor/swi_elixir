@@ -42,7 +42,7 @@ for backend <- [:port, :nif] do
 
   try do
     :ok = SWI.load(s, "examples/leanhat.pl")
-    :ok = SWI.load(s, "examples/nanocop.pl")
+    :ok = SWI.load(s, "examples/ileancop.pl")
 
     workloads = [
       {"tiny success", "true"},
@@ -50,8 +50,8 @@ for backend <- [:port, :nif] do
       {"100 answers", "between(1,100,X)"},
       {"leanHaT quantified",
        ~s|once(leanhat:prove_text("((all X:(p(X)=>q(X))), (all Y:p(Y))) => all Z:q(Z)"))|},
-      {"nanoCoP HT quantified",
-       ~s|once(nanocop:prove_text("((all X:(p(X)=>q(X))), (all Y:p(Y))) => all Z:q(Z)",ht))|}
+      {"ileanCoP intuitionistic quantified",
+       ~s|ileancop:prove_text("((all X:(p(X)=>q(X))), (all Y:p(Y))) => all Z:q(Z)")|}
     ]
 
     for {label, goal} <- workloads do

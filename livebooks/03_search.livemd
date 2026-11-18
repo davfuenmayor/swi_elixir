@@ -16,7 +16,7 @@ This notebook uses SWI-Prolog's [CLP(FD) library](https://www.swi-prolog.org/pld
 to state the constraints, then lets Elixir decide how many solutions to consume.
 The board displays are built from the returned placements.
 
-Choose **Evaluate all** in Standalone. [All chapters and setup help](intro.livemd).
+[All chapters and setup help](intro.livemd).
 
 * [Start a session](#preliminaries-start-a-session)
 * [State the constraints](#state-the-problem-in-prolog)

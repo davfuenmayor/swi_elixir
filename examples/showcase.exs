@@ -1,6 +1,6 @@
 defmodule ProverShowcase do
   @moduledoc "Formula generators and prover examples."
-  @all [{:leanhat, :ht}, {:nanocop, :ht}, {:nanocop, :intu}]
+  @all [leancop: :classical, leanhat: :ht, ileancop: :intu]
 
   def cases do
     [
@@ -8,43 +8,43 @@ defmodule ProverShowcase do
         name: "Function chain (4)",
         formula: chain(4),
         modes: @all,
-        expected: %{ht: "proved", intu: "proved"}
+        expected: %{classical: "proved", ht: "proved", intu: "proved"}
       },
       %{
-        name: "Function chain (20)",
-        formula: chain(20),
-        modes: [{:nanocop, :intu}],
+        name: "Function chain (6)",
+        formula: chain(6),
+        modes: [ileancop: :intu],
         expected: %{intu: "proved"}
       },
       %{
-        name: "Four pigeons, three holes",
-        formula: pigeon(3),
-        modes: [{:nanocop, :ht}, {:nanocop, :intu}],
-        expected: %{ht: "proved", intu: "proved"}
+        name: "Three pigeons, two holes",
+        formula: pigeon(2),
+        modes: @all,
+        expected: %{classical: "proved", ht: "proved", intu: "proved"}
       },
       %{
         name: "Pelletier 16: prelinearity",
         formula: "(p=>q);(q=>p)",
         modes: @all,
-        expected: %{ht: "proved", intu: "exhausted"}
+        expected: %{classical: "proved", ht: "proved", intu: "exhausted"}
       },
       %{
         name: "Pelletier 18: quantified witness",
         formula: "ex Y:all X:(p(Y)=>p(X))",
         modes: @all,
-        expected: %{ht: "proved", intu: "exhausted"}
+        expected: %{classical: "proved", ht: "proved", intu: "exhausted"}
       },
       %{
-        name: "Excluded middle (negative control)",
+        name: "Excluded middle",
         formula: "p; ~p",
         modes: @all,
-        expected: %{ht: "exhausted", intu: "exhausted"}
+        expected: %{classical: "proved", ht: "exhausted", intu: "exhausted"}
       },
       %{
-        name: "Double-negation elimination (negative control)",
+        name: "Double-negation elimination",
         formula: "(~ ~p)=>p",
         modes: @all,
-        expected: %{ht: "exhausted", intu: "exhausted"}
+        expected: %{classical: "proved", ht: "exhausted", intu: "exhausted"}
       }
     ]
   end

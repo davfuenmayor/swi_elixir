@@ -7,5 +7,6 @@ Release archives ship SWI-Prolog 10.0.1 and its [component notices](native/licen
 including SWI-Prolog, LibBF, Mersenne Twister, zlib, OTP headers and toolchain
 components where applicable.
 
-[Vendored systems and their licenses](vendor/README.md) ship with the repository.
-The Hex package excludes `vendor/`, `examples/` and `livebooks/`.
+The [provers, Metagol and Aleph](vendor/README.md) are example software
+for the Livebooks and their tests. They ship with the source repository.
+The Hex package and SWI-Prolog runtime archives exclude them.
