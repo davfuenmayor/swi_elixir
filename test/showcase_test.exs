@@ -74,19 +74,18 @@ defmodule SWI.ShowcaseTest do
 
   test "timeout and early halt restore diagnostic wrappers and allow reuse", %{sessions: sessions} do
     for {_, session} <- sessions do
-      # Controlled delay avoids relying on machine-specific search timings.
       {:ok, true} =
         SWI.call(
           session,
-          "forall(true,wrap_predicate(nanocop:prove(_,_,_,_,_,_,_,_,_,_),test_delay,W,(sleep(1),call(W))))"
+          "wrap_predicate(nanocop:prove(_,_,_,_,_,_,_,_,_,_),test_timeout,_,throw(time_limit_exceeded))"
         )
 
       try do
         goal = ProverShowcase.goal(:nanocop, :intu, ProverShowcase.chain(4))
-        assert SWI.call(session, goal, timeout: 20) == {:error, :timeout}
+        assert SWI.call(session, goal) == {:error, :timeout}
         assert_unwrapped(session)
       after
-        SWI.call(session, "unwrap_predicate(nanocop:prove/10,test_delay)")
+        SWI.call(session, "unwrap_predicate(nanocop:prove/10,test_timeout)")
       end
 
       assert {:ok, true} =

@@ -39,8 +39,9 @@ work offline. Restart BEAM after replacing a NIF.
 1. Choose an unused wrapper version and update `mix.exs` before building. SWI's
    version is separate. Native source fingerprints cover the C shim, Makefile,
    build/metadata/notices scripts and committed licenses, with LF source endings.
-2. Run **Native SWI builds** on the reviewed source. It builds/tests native
-   Linux x86-64/ARM64, Windows x86-64 and both Macs. Linux builds in Ubuntu 20.04
+2. Run **Native SWI builds** on the reviewed source. It builds and exercises the
+   installed package on native Linux x86-64/ARM64, Windows x86-64 and both Macs.
+   The Linux x86-64 job also runs the full functional suite. Linux builds in Ubuntu 20.04
    to retain glibc 2.31; macOS requests deployment target 12. Native runner versions
    do not prove minimum-OS compatibility. The workflow has read-only permissions
    and never publishes.

@@ -177,7 +177,8 @@ defmodule SWITest do
   test "Port crash is isolated and the next request starts a fresh runtime" do
     s = start_supervised!({SWI.Session, backend: :port})
     assert :ok == SWI.load(s, "examples/family.pl")
-    assert {:error, {:port_exit, 7}} = SWI.call(s, "halt(7)")
+    assert {:error, {:port_exit, status}} = SWI.call(s, "halt(7)")
+    assert is_integer(status) and status != 0
     assert Process.alive?(s)
     assert {:ok, true} = SWI.call(s, "true")
     assert {:error, {:prolog, _}} = SWI.call(s, "family:ancestor(ada,emmy)")

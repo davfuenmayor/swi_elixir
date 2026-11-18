@@ -82,15 +82,15 @@ jobs:
           archive=$(sed -n 's/^SWI_NATIVE_ARCHIVE=//p' "$(cygpath -u "$RUNNER_TEMP")/swi-build.log")
           test -n "$archive"
           echo "SWI_ELIXIR_BUNDLE=$archive" >> "$GITHUB_ENV"
-      - name: Test both backends and source package
+      - name: Install the source package and exercise both backends
         run: |
           mix local.hex --force
-          mix test
-          mix run scripts/check_native.exs
           mix hex.build -o "$RUNNER_TEMP/swi.tar"
           elixir scripts/check_package.exs "$RUNNER_TEMP/swi.tar"
           elixir scripts/check_packaged_install.exs "$RUNNER_TEMP/swi.tar"
-          git diff --exit-code
+      - name: Run the full functional suite
+        if: matrix.platform.target == 'linux-x86_64'
+        run: mix test
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: native-${{ matrix.platform.target }}

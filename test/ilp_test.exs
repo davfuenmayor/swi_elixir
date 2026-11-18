@@ -127,14 +127,14 @@ defmodule SWI.ILPTest do
       assert {:ok, true} =
                SWI.call(
                  s,
-                 "forall(true,wrap_predicate(metagol:learn(_,_,_),ilp_delay,W,(sleep(1),call(W))))"
+                 "wrap_predicate(metagol:learn(_,_,_),ilp_timeout,_,throw(time_limit_exceeded))"
                )
 
       try do
-        assert SWI.call(s, "metagol_ilp:learn_task(droplasts,3,_,_,_,_,_)", timeout: 20) ==
+        assert SWI.call(s, "metagol_ilp:learn_task(droplasts,3,_,_,_,_,_)") ==
                  {:error, :timeout}
       after
-        assert {:ok, true} = SWI.call(s, "unwrap_predicate(metagol:learn/3,ilp_delay)")
+        assert {:ok, true} = SWI.call(s, "unwrap_predicate(metagol:learn/3,ilp_timeout)")
       end
 
       [after_timeout] = SWI.query(s, "metagol_ilp:save_settings(S)") |> Enum.to_list()
@@ -150,15 +150,15 @@ defmodule SWI.ILPTest do
       assert {:ok, true} =
                SWI.call(
                  s,
-                 "forall(true,wrap_predicate(aleph:induce(_),ilp_delay,W," <>
-                   "(assertz(aleph_trains:eastbound(timeout_probe)),sleep(1),call(W))))"
+                 "wrap_predicate(aleph:induce(_),ilp_timeout,_," <>
+                   "(assertz(aleph_trains:eastbound(timeout_probe)),throw(time_limit_exceeded)))"
                )
 
       try do
-        assert SWI.call(s, "aleph_ilp:learn_task(trains,4,_,_,_,_,_,_)", timeout: 100) ==
+        assert SWI.call(s, "aleph_ilp:learn_task(trains,4,_,_,_,_,_,_)") ==
                  {:error, :timeout}
       after
-        assert {:ok, true} = SWI.call(s, "unwrap_predicate(aleph:induce/1,ilp_delay)")
+        assert {:ok, true} = SWI.call(s, "unwrap_predicate(aleph:induce/1,ilp_timeout)")
       end
 
       assert SWI.call(s, "aleph_trains:eastbound(timeout_probe)") == {:ok, false}

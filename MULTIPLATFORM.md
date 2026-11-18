@@ -62,10 +62,10 @@ mix test test/distribution_test.exs test/platform_test.exs
 mix run scripts/check_native.exs
 ```
 
-CI additionally runs `mix test` on each target, including both backends and
-relocated execution without system SWI. The smoke check exercises bignums, CLPFD
-and exceptions. Installer tests check archive integrity, cache recovery, offline
-reuse, and rejection of stale or unsafe release inputs.
+CI installs the source package and runs the same Port and NIF smoke check on
+each target. The check exercises bignums, CLPFD and exceptions. The Linux x86-64
+job also runs the full `mix test` suite, including query timeouts, fault injection,
+and relocated execution without system SWI.
 
 ```sh
 mix hex.build -o /tmp/swi.tar
@@ -74,8 +74,8 @@ elixir scripts/check_packaged_install.exs /tmp/swi.tar
 ```
 
 The package guard rejects binary/archive payloads. The consumer check extracts
-the package into a path containing spaces, restricts PATH to the OS process-kill
-utility (no SWI or compilers), and runs both backends.
+the package into a path containing spaces and installs it with `Mix.install/1`,
+the same entry point used by Livebook.
 CI uses its explicitly built bundle. Public delivery must also be tested without
 that override, with an empty cache, on every target. Evaluate Livebooks on native
 runtimes before advertising notebook support; lesson content is unchanged.
