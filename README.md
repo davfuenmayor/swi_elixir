@@ -1,5 +1,7 @@
 # swi_elixir
 
+[![Native SWI builds](https://github.com/davfuenmayor/swi_elixir/actions/workflows/native.yml/badge.svg?branch=main)](https://github.com/davfuenmayor/swi_elixir/actions/workflows/native.yml?query=branch%3Amain)
+
 A small Elixir bridge to SWI-Prolog, with a persistent **Port** backend and an
 embedded **NIF** backend. Elixir owns sessions and consumes lazy solution
 streams; SWI handles parsing, unification, backtracking and proof search.

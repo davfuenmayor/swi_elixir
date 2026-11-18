@@ -75,7 +75,9 @@ elixir scripts/check_packaged_install.exs /tmp/swi.tar
 
 The package guard rejects binary/archive payloads. The consumer check extracts
 the package into a path containing spaces and installs it with `Mix.install/1`,
-the same entry point used by Livebook.
+the same entry point used by Livebook. CI keeps the unpacked source and Mix
+cache in the runner's temporary directory. For a manual run, you can remove
+the printed check directory after Elixir exits.
 CI uses its explicitly built bundle. Public delivery must also be tested without
 that override, with an empty cache, on every target. Evaluate Livebooks on native
 runtimes before advertising notebook support; lesson content is unchanged.
