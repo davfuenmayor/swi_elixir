@@ -3,78 +3,89 @@ defmodule ILPShowcase do
   @project Path.expand("..", __DIR__)
 
   def learn(system, task, limit, backend \\ :port, sources \\ nil) do
-    source_dir = write_sources(sources)
+    with_sources(add_aleph_imports(sources), fn directory ->
+      adapter = Path.join(@project, "examples/#{system}_ilp.pl")
 
-    {goal, kernel} =
-      case system do
-        :metagol ->
-          {"metagol_ilp:learn_task(#{task},#{limit},Status,Program,Rows,Clauses,Trace)",
-           "metagol:learn(_,_,_)"}
+      {goal, kernel, paths} =
+        case system do
+          :metagol ->
+            {"metagol_ilp:learn_task(#{task},#{limit},Status,Program,Rows,Clauses,Trace)",
+             "metagol:learn(_,_,_)", [adapter, Path.join(directory, "metagol_tasks.pl")]}
 
-        :aleph ->
-          {aleph_goal(task, limit, source_dir, sources), "aleph:induce(_)"}
-      end
-
-    try do
-      {:ok, session} = SWI.start_link(backend: backend)
-
-      try do
-        :ok = SWI.load(session, Path.join(@project, "examples/#{system}_ilp.pl"))
-
-        if system == :metagol do
-          :ok = SWI.load(session, Path.join(source_dir, "metagol_tasks.pl"))
+          :aleph ->
+            {aleph_goal(task, limit, directory, sources), "aleph:induce(_)", [adapter]}
         end
 
-        query =
-          "statistics(inferences,Before),#{goal},statistics(inferences,After)," <>
-            "Inferences is After-Before,predicate_property(#{kernel},file(Source))"
+      engine = quote_path(Path.join(@project, "vendor/#{system}/#{system}.pl"))
 
-        {us, [answer]} =
-          :timer.tc(fn ->
-            SWI.query(session, query, timeout: 15_000) |> Enum.to_list()
-          end)
+      query =
+        "statistics(inferences,Before),#{goal},statistics(inferences,After)," <>
+          "Inferences is After-Before,predicate_property(#{kernel},file(Source))," <>
+          "same_file(Source,#{engine})"
 
-        {:atom, source} = answer["Source"]
-        true = source == Path.join(@project, "vendor/#{system}/#{system}.pl")
-        true = answer["Inferences"] > 0
+      execute(backend, paths, query)
+    end)
+  end
 
-        rows =
-          Enum.map(answer["Rows"], fn
-            {:compound, "result", [{:atom, split}, goal, expected, actual]} ->
-              %{split: split, goal: goal, expected: boolean(expected), actual: boolean(actual)}
-          end)
+  def run_inline(backend, sources, entries, goal) do
+    with_sources(sources, fn directory ->
+      paths = Enum.map(entries, &Path.join(directory, &1))
+      execute(backend, paths, goal.(directory))
+    end)
+  end
 
-        Map.merge(answer, %{"Rows" => rows, "Backend" => backend, "ElapsedUs" => us})
-      after
-        SWI.stop(session)
-      end
+  defp execute(backend, paths, goal) do
+    {:ok, session} = SWI.start_link(backend: backend)
+
+    try do
+      Enum.each(paths, fn path -> :ok = SWI.load(session, path) end)
+
+      {us, [answer]} =
+        :timer.tc(fn ->
+          SWI.query(session, goal, timeout: 15_000) |> Enum.to_list()
+        end)
+
+      true = answer["Inferences"] > 0
+
+      rows =
+        Enum.map(answer["Rows"], fn
+          {:compound, "result", [{:atom, split}, goal, expected, actual]} ->
+            %{split: split, goal: goal, expected: boolean(expected), actual: boolean(actual)}
+        end)
+
+      Map.merge(answer, %{"Rows" => rows, "Backend" => backend, "ElapsedUs" => us})
     after
-      if sources, do: File.rm_rf!(source_dir)
+      SWI.stop(session)
     end
   end
 
-  defp write_sources(nil), do: Path.join(@project, "examples")
+  defp with_sources(nil, run), do: run.(Path.join(@project, "examples"))
 
-  defp write_sources(sources) do
-    # SWI identifies loaded modules by source path, including after inline edits.
-    dir = Path.join(System.tmp_dir!(), "swi-ilp-#{System.pid()}")
-    File.mkdir_p!(dir)
+  defp with_sources(sources, run) do
+    # Keep the path stable when the native runtime reconsults an edited task.
+    directory = Path.join(System.tmp_dir!(), "swi-ilp-#{System.pid()}")
+    File.mkdir_p!(directory)
 
-    Enum.each(sources, fn {name, source} ->
-      source =
-        if String.starts_with?(name, "aleph_") do
-          [module, rest] = String.split(source, "\n", parts: 2)
+    try do
+      for {name, source} <- sources, do: File.write!(Path.join(directory, name), source)
+      run.(directory)
+    after
+      File.rm_rf!(directory)
+    end
+  end
 
-          module <>
-            "\n:- use_module('#{Path.join(@project, "vendor/aleph/aleph.pl")}').\n" <> rest
-        else
-          source
-        end
+  defp add_aleph_imports(nil), do: nil
 
-      File.write!(Path.join(dir, name), source)
-    end)
-
-    dir
+  defp add_aleph_imports(sources) do
+    for {name, source} <- sources, into: %{} do
+      if name in ["aleph_trains.pl", "aleph_membership.pl"] do
+        [module, body] = String.split(source, "\n", parts: 2)
+        engine = quote_path(Path.join(@project, "vendor/aleph/aleph.pl"))
+        {name, Enum.join([module, ":- use_module(#{engine}).", body], "\n")}
+      else
+        {name, source}
+      end
+    end
   end
 
   defp aleph_goal(task, limit, _source_dir, nil),
@@ -82,9 +93,11 @@ defmodule ILPShowcase do
 
   defp aleph_goal(task, limit, source_dir, _sources) do
     file = if task == :trains, do: "aleph_trains.pl", else: "aleph_membership.pl"
-    path = Path.join(source_dir, file) |> String.replace("'", "''")
-    "aleph_ilp:learn_task(#{task},#{limit},Program,Rows,Clauses,Bottom,Reduced,Trace,'#{path}')"
+    path = quote_path(Path.join(source_dir, file))
+    "aleph_ilp:learn_task(#{task},#{limit},Program,Rows,Clauses,Bottom,Reduced,Trace,#{path})"
   end
+
+  defp quote_path(path), do: path |> :json.encode() |> IO.iodata_to_binary()
 
   def check!(answer) do
     [_ | _] = answer["Rows"]

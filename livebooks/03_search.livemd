@@ -2,9 +2,11 @@
 
 ```elixir
 Mix.install([
-  {:swi_elixir, path: Path.expand("..", __DIR__)},
+  {:swi_elixir, github: "davfuenmayor/swi_elixir", branch: "main"},
   {:kino, "== 0.19.0"}
 ])
+
+Kino.nothing()
 ```
 
 ## Introduction
@@ -14,22 +16,19 @@ This notebook uses SWI-Prolog's [CLP(FD) library](https://www.swi-prolog.org/pld
 to state the constraints, then lets Elixir decide how many solutions to consume.
 The board displays are built from the returned placements.
 
-Evaluate from top to bottom in a local Livebook runtime on a [supported platform](../README.md#platforms-and-native-bundles).
-Setup installs this checkout, its bundled SWI runtime, and Kino; the first dependency installation needs
-network access. All search data is defined below.
-
-[All chapters](intro.livemd).
+Choose **Evaluate all** in Standalone. [All chapters and setup help](intro.livemd).
 
 * [Start a session](#preliminaries-start-a-session)
 * [State the constraints](#state-the-problem-in-prolog)
+* [Peek before search](#peek-before-search)
 * [Exhaust a finite search](#exhaust-a-finite-search)
 * [Take only three solutions](#stop-after-three-solutions)
 * [Use an infinite relation](#consume-a-finite-prefix-of-an-infinite-relation)
 
 ## Preliminaries: start a session
 
-The same query and loading API works with `:port` and `:nif`. Choose a backend
-here and close the session in the final cell before starting the workflow again.
+Start with `:port` for a separate SWI process. To try `:nif`, run the final close
+cell, change `backend`, and rerun from here. The search code stays the same.
 
 ```elixir
 import ExUnit.Assertions
@@ -45,11 +44,12 @@ The constraints eliminate attacks; `labeling/2` searches for complete placements
 
 ```elixir
 search_program = ~S"""
-:- module(search, [queens/2]).
+:- module(search, [queens/2, queen_constraints/2]).
 :- use_module(library(clpfd)).
 queens(N, Rows) :-
-    length(Rows, N), Rows ins 1..N,
-    safe(Rows), labeling([ff], Rows).
+    queen_constraints(N, Rows), labeling([ff], Rows).
+queen_constraints(N, Rows) :-
+    length(Rows, N), Rows ins 1..N, safe(Rows).
 safe([]).
 safe([Q|Qs]) :- diagonals(Qs, Q, 1), safe(Qs).
 diagonals([], _, _).
@@ -72,6 +72,24 @@ after
   File.rm!(path)
 end
 ```
+
+## Peek before search
+
+Constraints narrow the possible values without choosing a complete board.
+Place the first queen in row 2. Which rows can the adjacent queen still use?
+Same row rules out 2, and the diagonals rule out 1 and 3. Ask SWI for the
+second queen's domain before any labeling.
+
+```elixir
+goal = "search:(queen_constraints(4, [2,Q,_,_]), fd_dom(Q,Domain))"
+[%{"Domain" => domain}] = SWI.query(session, goal) |> Enum.to_list()
+
+assert domain == {:compound, "..", [4, 4]}
+%{possible_rows: [4]}
+```
+
+Here propagation leaves a single value. In larger boards a domain can still
+have several values, and labeling supplies the choices needed to finish.
 
 ## Exhaust a finite search
 

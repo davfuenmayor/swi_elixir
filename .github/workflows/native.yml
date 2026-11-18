@@ -1,8 +1,26 @@
 name: Native SWI builds
 on:
   pull_request:
+    paths:
+      - 'c_src/**'
+      - 'Makefile'
+      - 'mix.exs'
+      - 'native/licenses/**'
+      - 'scripts/build-runtime.sh'
+      - 'scripts/runtime-notices.exs'
+      - 'scripts/runtime-metadata.exs'
+      - '.github/workflows/native.yml'
   push:
     branches: [main]
+    paths:
+      - 'c_src/**'
+      - 'Makefile'
+      - 'mix.exs'
+      - 'native/licenses/**'
+      - 'scripts/build-runtime.sh'
+      - 'scripts/runtime-notices.exs'
+      - 'scripts/runtime-metadata.exs'
+      - '.github/workflows/native.yml'
   workflow_dispatch:
 permissions:
   contents: read

@@ -2,9 +2,13 @@
 
 ```elixir
 Mix.install([
-  {:swi_elixir, path: Path.expand("..", __DIR__)},
+  {:swi_elixir, github: "davfuenmayor/swi_elixir", branch: "main"},
   {:kino, "== 0.19.0"}
 ])
+
+project = Path.join(Mix.install_project_dir(), "deps/swi_elixir")
+
+Kino.nothing()
 ```
 
 ## Introduction
@@ -15,11 +19,7 @@ relation, learn recursion, and transform nested lists. Read each task's
 background and labels, predict a possible rule, then inspect what was learned.
 
 Start with [Getting started](01_basic.livemd) if the wrapper is new to you.
-Evaluate top to bottom in a local runtime on a [supported platform](../README.md#platforms-and-native-bundles).
-Setup installs this checkout, its bundled SWI runtime, and Kino. The learner
-is vendored; the complete task definitions and datasets are inline below.
-
-[All chapters](intro.livemd).
+Choose **Evaluate all** in Standalone. [All chapters and setup help](intro.livemd).
 
 * [Preliminaries](#preliminaries-prepare-a-learning-experiment)
 * [Understand the learning contract](#understand-the-learning-contract)
@@ -30,26 +30,150 @@ is vendored; the complete task definitions and datasets are inline below.
 
 ## Preliminaries: prepare a learning experiment
 
-Choose the backend once. The notebook-only `learn` function passes visible
-Prolog source to the shared integration helper. That helper starts a session,
-loads the learner and this task, performs bounded learning, executes the
-returned clauses, and closes its session in `after`.
+Pick `:port` or `:nif` below. Each call to `learn` opens and closes its own
+session, so you can change `backend` and rerun an experiment. The calls and
+results work the same way.
 
 ```elixir
 import ExUnit.Assertions
-project = Path.expand("..", __DIR__)
 Code.require_file(Path.join(project, "examples/ilp.exs"))
 backend = :port
+```
 
+### What the harness does
+
+The harness below declares which shapes a learned clause may take. It then
+calls Metagol and evaluates the resulting clauses. Metagol itself is a
+vendored library. Focus on the four `metarule/4` facts on your first pass.
+
+```elixir
+engine = Path.join(project, "vendor/metagol/metagol.pl")
+engine_import = ":- use_module(" <> IO.iodata_to_binary(:json.encode(engine)) <> ")."
+
+adapter = ~S"""
+:- module(metagol_ilp, [learn_task/7]).
+""" <> engine_import <> "\n" <> ~S"""
+:- use_module(ilp_support).
+
+% Upstream Metagol resolves primitives in user. Prefix these demonstration hooks.
+user:mg_mother(A,B) :- metagol_tasks:mg_mother(A,B).
+user:mg_father(A,B) :- metagol_tasks:mg_father(A,B).
+user:mg_parent(A,B) :- metagol_tasks:mg_parent(A,B).
+user:mg_tail(A,B) :- metagol_ilp:mg_tail(A,B).
+user:mg_reverse(A,B) :- metagol_ilp:mg_reverse(A,B).
+
+metarule(identity, [P,Q], [P,A,B], [[Q,A,B]]).
+metarule(chain, [P,Q,R], [P,A,B], [[Q,A,C],[R,C,B]]).
+metarule(tailrec, [P,Q], [P,A,B], [[Q,A,C],[P,C,B]]).
+metarule(tohigherorder, [P,Q,F], [P,A,B], [[Q,A,B,F]]).
+:- if(\+ clause(metagol:ibk([map,[],[],_],[],_), true)).
+ibk([map,[],[],_], []).
+ibk([map,[A|As],[B|Bs],F], [[F,A,B],[map,As,Bs,F]]).
+:- endif.
+
+% Runtime implementation of the interpreted map for executing learned clauses.
+map([], [], _).
+map([A|As], [B|Bs], F) :- call(F,A,B), map(As,Bs,F).
+mg_tail([_|T], T).
+mg_reverse(A,B) :- reverse(A,B).
+
+% Task facts and examples are loaded separately by each consumer.
+
+% These examples share Metagol's upstream registry. Serialize learning and restore
+% user declarations/settings; the native runtime shares modules across sessions.
+learn_task(Task, Limit, Status, ProgramText, Rows, Clauses, Trace) :-
+    must_be(integer, Limit), between(1,6,Limit), metagol_tasks:primitives(Task, Primitives),
+    with_mutex(metagol_ilp,
+      setup_call_cleanup(
+        (metagol:options, save_settings(Saved)),
+        with_output_to(string(Trace),
+        (configure(Primitives, Limit), metagol_tasks:training(Task, Pos, Neg), metagol_tasks:tests(Task, Tests),
+         (once(metagol:learn(Pos, Neg, MetaProgram)) ->
+           Status = learned,
+           reverse(MetaProgram, Ordered),
+           maplist(metagol:metasub_to_clause, Ordered, Program),
+           length(Program, Clauses), program_text(Program, ProgramText),
+           with_program(metagol_ilp, Program,
+             evaluate(metagol_ilp, Pos, Neg, Tests, Rows))
+         ; Status = no_hypothesis, Clauses = 0, ProgramText = "", Rows = []))),
+        restore_settings(Saved))).
+
+save_settings(settings(Body, Options, Functional)) :-
+    findall(P, user:body_pred(P), Body),
+    findall(O, (option_pattern(O), functor(O,N,A), current_predicate(metagol:N/A), call(metagol:O)), Options),
+    (metagol:functional -> Functional = true ; Functional = false).
+option_pattern(max_clauses(_)).
+option_pattern(min_clauses(_)).
+option_pattern(max_inv_preds(_)).
+
+configure(Primitives, Limit) :-
+    retractall(user:body_pred(_)),
+    forall(member(P,Primitives), assertz(user:body_pred(P))),
+    metagol:set_option(min_clauses(1)), metagol:set_option(max_clauses(Limit)),
+    N is Limit-1, metagol:set_option(max_inv_preds(N)), retractall(metagol:functional).
+
+restore_settings(settings(Body, Options, Functional)) :-
+    retractall(user:body_pred(_)),
+    forall(member(P,Body), assertz(user:body_pred(P))),
+    forall(option_pattern(O), retractall(metagol:O)),
+    forall(member(O,Options), assertz(metagol:O)),
+    retractall(metagol:functional),
+    (Functional == true -> assertz(metagol:functional) ; true).
+"""
+```
+
+The scorer runs each query and records expected versus actual success. A
+clause reference lets us remove only the learned clauses after scoring.
+
+```elixir
+evaluation = ~S"""
+% Project-authored display and evaluation helpers; no learning algorithm here.
+:- module(ilp_support, [program_text/2, evaluate/5, with_program/3]).
+:- meta_predicate with_program(+, +, 0).
+
+program_text(Program, Text) :-
+    with_output_to(string(Text), maplist(portray_clause, Program)).
+
+% Reference-based cleanup leaves background knowledge intact, including on error.
+with_program(Module, Program, Goal) :-
+    setup_call_cleanup(
+      findall(Ref, (member(Clause, Program), assertz(Module:Clause, Ref)), Refs),
+      Goal,
+      maplist(erase, Refs)).
+
+evaluate(Module, Pos, Neg, Tests, Rows) :-
+    findall(result(Split, Text, Expected, Actual),
+      (example(Pos, Neg, Tests, Split, Goal, Expected),
+       with_output_to(string(Text), write_term(Goal, [quoted(true)])),
+       (once(Module:Goal) -> Actual = true ; Actual = false)), Rows).
+
+example(Pos, _, _, train, Goal, true) :- member(Goal, Pos).
+example(_, Neg, _, train, Goal, false) :- member(Goal, Neg).
+example(_, _, Tests, test, Goal, Expected) :- member(Goal-Expected, Tests).
+"""
+```
+
+```elixir
 learn = fn task, budget, source, selected ->
-  ILPShowcase.learn(:metagol, task, budget, selected, %{"metagol_tasks.pl" => source})
+  files = %{
+    "ilp_support.pl" => evaluation,
+    "metagol_ilp.pl" => adapter,
+    "metagol_tasks.pl" => source
+  }
+
+  ILPShowcase.run_inline(selected, files, ["metagol_ilp.pl", "metagol_tasks.pl"], fn _ ->
+    """
+    statistics(inferences, Before),
+    metagol_ilp:learn_task(#{task}, #{budget}, Status, Program, Rows, Clauses, Trace),
+    statistics(inferences, After),
+    Inferences is After - Before
+    """
+  end)
 end
 ```
 
-Change `backend` to `:nif` to use embedded SWI through the same interface.
-Metagol's registry and native modules are shared, so run learning experiments
-serially in a runtime. The adapter restores the settings and primitive
-registrations it changes. The final comparison runs both backends for you.
+With NIF, run one experiment at a time because Metagol's settings are shared.
+The final comparison runs both backends for you.
 
 ## Understand the learning contract
 
@@ -69,8 +193,9 @@ flowchart LR
 """)
 ```
 
-Metarules constrain the shape of candidate clauses. The shared adapter declares
-these four upstream forms; predicate symbols themselves are learned.
+Metarules constrain the shape of candidate clauses. In the chain template,
+choosing `Q = parent` and `R = parent` gives two parent steps through the
+same `C`. Metagol chooses predicate symbols as it searches.
 
 | Template       | Allowed clause              | Purpose                     |
 | -------------- | --------------------------- | --------------------------- |
@@ -92,8 +217,9 @@ Learn a relation that needs a reusable intermediate predicate. The task supplies
 `mg_mother/2` and `mg_father/2`, but no `parent/2`. Five positives cover paths
 through both kinds of parent; `grandparent(amy,amelia)` is negative.
 
-This is the complete executable task. The Nora–Ivy–Leo facts support a
-project-authored holdout query that never appears among the training labels.
+Follow Nora → Ivy → Leo by hand. This path is in the background facts, but
+`grandparent(nora,leo)` is absent from the training labels. It checks whether
+the learned rule also works on that path.
 
 ```elixir
 grandparent_source = ~S"""

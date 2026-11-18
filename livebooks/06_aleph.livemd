@@ -2,9 +2,13 @@
 
 ```elixir
 Mix.install([
-  {:swi_elixir, path: Path.expand("..", __DIR__)},
+  {:swi_elixir, github: "davfuenmayor/swi_elixir", branch: "main"},
   {:kino, "== 0.19.0"}
 ])
+
+project = Path.join(Mix.install_project_dir(), "deps/swi_elixir")
+
+Kino.nothing()
 ```
 
 ## Introduction
@@ -15,13 +19,7 @@ This chapter uses the real [Aleph learner](https://github.com/friguzzi/aleph)
 to discover a relational classifier, deliberately force memorization, and
 learn recursive list membership.
 
-Evaluate top to bottom in a local runtime on a [supported platform](../README.md#platforms-and-native-bundles).
-Setup installs this checkout, its bundled SWI runtime, and Kino. The learner
-is vendored, and all task source and training data is inline below. Start with
-[Getting started](01_basic.livemd) for the wrapper or [Metagol](05_metagol.livemd)
-for another approach to Inductive Logic Programming.
-
-[All chapters](intro.livemd).
+Choose **Evaluate all** in Standalone. [All chapters and setup help](intro.livemd).
 
 * [Preliminaries](#preliminaries-prepare-a-learning-experiment)
 * [Read the language bias](#read-the-language-bias)
@@ -32,26 +30,135 @@ for another approach to Inductive Logic Programming.
 
 ## Preliminaries: prepare a learning experiment
 
-Choose `:port` or `:nif`. The notebook-only helper passes the visible Prolog
-source to the shared adapter, which invokes Aleph, executes its learned
-clauses, and returns ordinary Elixir values. It releases its session in `after`.
+Pick `:port` or `:nif` below. Each call to `learn` opens and closes its own
+session. To switch, change `backend` and rerun the experiment. The calls and
+results work the same way.
 
 ```elixir
 import ExUnit.Assertions
-project = Path.expand("..", __DIR__)
 Code.require_file(Path.join(project, "examples/ilp.exs"))
 backend = :port
+```
 
+### What the harness does
+
+The harness below loads Aleph, calls saturation and reduction before induction,
+then runs the learned clauses against the examples. The learner itself is a
+vendored library. Focus on the mode declarations and examples on your first pass.
+
+```elixir
+engine = Path.join(project, "vendor/aleph/aleph.pl")
+engine_import = ":- use_module(" <> IO.iodata_to_binary(:json.encode(engine)) <> ")."
+
+adapter = ~S"""
+:- module(aleph_ilp, [learn_task/9]).
+""" <> engine_import <> "\n" <> ~S"""
+:- use_module(ilp_support).
+
+lesson(trains, aleph_trains, eastbound(_)).
+lesson(membership, aleph_membership, mem(_,_)).
+tests(trains,
+ [eastbound(probe_yes)-true, eastbound(probe_long)-false,
+  eastbound(probe_open)-false, eastbound(probe_split)-false]).
+tests(membership,
+ [mem(z,[a,b,c,d,e,z])-true, mem(z,[a,b,c])-false,
+  mem(a,[])-false, mem(a,[a,a])-true]).
+
+% Re-read the task for each experiment: Aleph consumes examples and updates its
+% background during induction. Serialize reconsult/search in the shared NIF VM.
+learn_task(Task, Length, ProgramText, Rows, Clauses, BottomText, ReducedText, Trace, Path) :-
+    must_be(integer, Length), between(1,6,Length),
+    lesson(Task, Module, Target),
+    with_mutex(aleph_ilp,
+      setup_call_cleanup(
+        load_task_source(Module, Path),
+        with_output_to(string(Trace),
+        (Module:aleph_set(clauselength, Length),
+         Module:aleph_set(noise, 0), Module:aleph_set(nodes, 5000),
+         once(Module:sat(1)), Module:bottom(Bottom), program_text([Bottom], BottomText),
+         once(Module:reduce(Reduced)), program_text([Reduced], ReducedText),
+         once(Module:induce(Program)),
+         length(Program, Clauses), program_text(Program, ProgramText),
+         findall(P, Module:example(_,pos,P), Pos),
+         findall(N, Module:example(_,neg,N), Neg), tests(Task, Tests),
+         evaluate(Module, Pos, Neg, Tests, Rows))),
+        cleanup(Module, Target))).
+
+load_task_source(Module, Path) :-
+    forall((source_file(Module:_, Loaded), file_base_name(Loaded, Name),
+            memberchk(Name, ['aleph_trains.pl','aleph_membership.pl']),
+            Loaded \== Path), unload_file(Loaded)),
+    load_files(Path, [if(true)]).
+
+cleanup(Module, Target) :-
+    retractall(Module:Target),
+    % Aleph initializes zero-arity command shims with assert/1. Reconsult does
+    % not replace those clauses; remove our private modules' generated shims.
+    forall((predicate_property(Module:Head, dynamic), functor(Head,_,0),
+            \+ predicate_property(Module:Head, imported_from(_)),
+            clause(Module:Head, _, Ref), \+ clause_property(Ref, file(_))),
+           erase(Ref)).
+"""
+```
+
+The scorer runs each query and records expected versus actual success. A
+clause reference lets us remove only the learned clauses after scoring.
+
+```elixir
+evaluation = ~S"""
+% Project-authored display and evaluation helpers; no learning algorithm here.
+:- module(ilp_support, [program_text/2, evaluate/5, with_program/3]).
+:- meta_predicate with_program(+, +, 0).
+
+program_text(Program, Text) :-
+    with_output_to(string(Text), maplist(portray_clause, Program)).
+
+% Reference-based cleanup leaves background knowledge intact, including on error.
+with_program(Module, Program, Goal) :-
+    setup_call_cleanup(
+      findall(Ref, (member(Clause, Program), assertz(Module:Clause, Ref)), Refs),
+      Goal,
+      maplist(erase, Refs)).
+
+evaluate(Module, Pos, Neg, Tests, Rows) :-
+    findall(result(Split, Text, Expected, Actual),
+      (example(Pos, Neg, Tests, Split, Goal, Expected),
+       with_output_to(string(Text), write_term(Goal, [quoted(true)])),
+       (once(Module:Goal) -> Actual = true ; Actual = false)), Rows).
+
+example(Pos, _, _, train, Goal, true) :- member(Goal, Pos).
+example(_, Neg, _, train, Goal, false) :- member(Goal, Neg).
+example(_, _, Tests, test, Goal, Expected) :- member(Goal-Expected, Tests).
+"""
+```
+
+```elixir
 learn = fn task, limit, source, selected ->
   file = if task == :trains, do: "aleph_trains.pl", else: "aleph_membership.pl"
-  ILPShowcase.learn(:aleph, task, limit, selected, %{file => source})
+  [module, body] = String.split(source, "\n", parts: 2)
+  task_source = Enum.join([module, engine_import, body], "\n")
+
+  files = %{
+    "ilp_support.pl" => evaluation,
+    "aleph_ilp.pl" => adapter,
+    file => task_source
+  }
+
+  ILPShowcase.run_inline(selected, files, ["aleph_ilp.pl"], fn directory ->
+    path = :json.encode(Path.join(directory, file)) |> IO.iodata_to_binary()
+
+    """
+    statistics(inferences, Before),
+    aleph_ilp:learn_task(#{task}, #{limit}, Program, Rows, Clauses, Bottom, Reduced, Trace, #{path}),
+    statistics(inferences, After),
+    Inferences is After - Before
+    """
+  end)
 end
 ```
 
-The adapter rereads the task before each experiment because Aleph consumes
-uncovered examples and installs learned clauses. It removes learned target
-clauses afterward. Run learning operations serially in the embedded runtime,
-where native modules and learner state are shared.
+Each run reloads its examples and removes the learned clauses afterward. With
+NIF, run one experiment at a time because Aleph's state is shared.
 
 ## Understand Aleph's search
 
@@ -93,8 +200,11 @@ declarations control which variables and literals Aleph can introduce.
 | `determination/2` | Permitted explanatory predicate for the target |
 
 This first part of our task declares a module and the complete language bias.
-The adapter supplies Aleph's engine import when writing the task to a temporary
-file; it does not supply the modes or training examples.
+The `learn` cell above adds Aleph's import to the task before SWI loads it.
+The modes and training examples are all below.
+
+Read `has_car(+train,-car)` as “given a train, introduce a car.” The learner
+can then use that car as the input to `short(+car)` and `closed(+car)`.
 
 ```elixir
 train_bias = ~S"""

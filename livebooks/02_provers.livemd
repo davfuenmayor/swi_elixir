@@ -2,25 +2,23 @@
 
 ```elixir
 Mix.install([
-  {:swi_elixir, path: Path.expand("..", __DIR__)},
+  {:swi_elixir, github: "davfuenmayor/swi_elixir", branch: "main"},
   {:kino, "== 0.19.0"}
 ])
+
+project = Path.join(Mix.install_project_dir(), "deps/swi_elixir")
+
+Kino.nothing()
 ```
 
 ## Introduction
 
 Run two actual theorem provers on quantified formulas, inspect their search
-activity, and compare two logics. Sources: [leanHaT](https://leancop.de/leanhat/),
-[nanoCoP-i-HT](https://www.leancop.de/ihat/), and the
-[TABLEAUX tutorial examples](https://jens-otten.de/tutorial_tableaux19/examples/).
+activity, and compare two logics. The provers are [leanHaT](https://leancop.de/leanhat/)
+and [nanoCoP-i-HT](https://www.leancop.de/ihat/).
 
 Start with [Getting started](01_basic.livemd) if the wrapper is new to you.
-Evaluate top to bottom in a local Livebook runtime on a [supported platform](../README.md#platforms-and-native-bundles).
-Setup installs this checkout, its bundled SWI runtime, and Kino; all formulas
-and formula generators are visible in the lesson. No solver downloads or
-endpoint requests occur when running the examples.
-
-[All chapters](intro.livemd).
+Choose **Evaluate all** in Standalone. [All chapters and setup help](intro.livemd).
 
 * [Preliminaries](#preliminaries-start-the-provers)
 * [Follow a quantified function chain](#follow-a-quantified-function-chain)
@@ -30,24 +28,129 @@ endpoint requests occur when running the examples.
 
 ## Preliminaries: start the provers
 
-The shared adapter loads the vendored engines, applies their upstream
-preprocessing, and records calls to the real recursive search predicates.
-It supplies no answers or task definitions. Choose `:port` or `:nif` here;
-the lesson uses the same API with either backend.
+This cell loads both provers and starts a session. Leave `backend` at `:port`
+for a separate SWI process, or choose `:nif` to run inside Livebook's BEAM.
+The goals and calls are the same either way.
 
 ```elixir
 import ExUnit.Assertions
-project = Path.expand("..", __DIR__)
-Code.require_file(Path.join(project, "examples/showcase.exs"))
 backend = :port
-{:ok, session} = SWI.start_link(backend: backend)
-:ok = SWI.load(session, Path.join(project, "examples/prover_showcase.pl"))
+
+vendor = fn path ->
+  :json.encode(Path.join([project, "vendor", path])) |> IO.iodata_to_binary()
+end
 ```
 
-Keep this session through the lesson and close it in the final cell. Before
-replacing it, run that close cell or restart the notebook runtime.
-The diagnostic wraps shared SWI predicates, so run these examples serially
-with other prover operations in the same embedded runtime.
+### How we ask the provers
+
+These two adapters parse the formula in the prover's syntax and call its
+search predicate. The engines themselves are vendored libraries. nanoCoP
+uses an occurs check so unifying a variable with a term containing that
+variable fails instead of creating a cycle.
+
+```elixir
+leanhat = ~s"""
+:- module(leanhat, [prove_text/1]).
+% The translator changes '=' precedence; restore it before reloading core.
+:- op(700, xfx, =).
+:- include(#{vendor.("leanHaT/leanhat_swi.pl")}).
+:- include(#{vendor.("leanHaT/nanocop_tptp2.pl")}).
+
+prove_text(Text) :-
+    swi_bridge:read_goal(Text, leanhat, F, _), leancop_equal(F, Problem), prove(Problem).
+"""
+```
+
+```elixir
+nanocop = ~s"""
+:- module(nanocop, [prove_text/2, prove_text/3]).
+% The translator changes '=' precedence. Restore it before reconsulting core.
+:- op(700, xfx, =).
+% Keep the upstream load-time directive from changing the caller's flag.
+:- current_prolog_flag(occurs_check, Flag), nb_setval(nanocop_load_flag, Flag).
+:- include(#{vendor.("nanoCoP-i-HT/nanocopi20_swi.pl")}).
+:- nb_getval(nanocop_load_flag, Flag), set_prolog_flag(occurs_check, Flag),
+   nb_delete(nanocop_load_flag).
+:- include(#{vendor.("nanoCoP-i-HT/nanocop_tptp2.pl")}).
+% Upstream uses a dynamic scratch database. Each query engine owns its copy.
+:- thread_local lit/4, pathlim/0.
+
+prove_text(Text, Logic) :- prove_text(Text, Logic, _).
+
+prove_text(Text, Logic, Proof) :-
+    memberchk(Logic, [intu, ht]),
+    setup_call_cleanup(
+      (current_prolog_flag(occurs_check, Previous), set_prolog_flag(occurs_check, true)),
+      (swi_bridge:read_goal(Text, nanocop, F, _),
+       leancop_equal(F, Equal), leancop_intermed(Equal, Logic, Problem), prove(Problem, Proof)),
+      set_prolog_flag(occurs_check, Previous)).
+"""
+```
+
+The next program wraps each recursive search predicate with a counter.
+Read the three parts of `setup_call_cleanup/3` as install, search, and
+restore. The counter observes search without choosing its branches.
+
+```elixir
+diagnostics = ~S"""
+:- module(prover_showcase, [run/7, source/3]).
+:- use_module(library(prolog_wrap)).
+:- use_module(leanhat).
+:- use_module(nanocop).
+
+core(leanhat, leanhat:prove(_,_,_,_), leanhat:prove/4).
+core(nanocop, nanocop:prove(_,_,_,_,_,_,_,_,_,_), nanocop:prove/10).
+
+source(Prover, File, Line) :-
+    core(Prover, Head, _), clause(Head, _, Ref),
+    clause_property(Ref, file(File)), clause_property(Ref, line_count(Line)), !.
+
+% Run serially: wrappers modify predicates shared by all embedded engines.
+% The counter itself belongs to the calling query engine.
+run(Prover, Logic, Text, Result, Calls, Inferences, Proof) :-
+    core(Prover, Head, PI),
+    setup_call_cleanup(
+      (nb_setval(showcase_calls, 0),
+       wrap_predicate(Head, showcase, Wrapped,
+         (prover_showcase:count, call(Wrapped)))),
+      (statistics(inferences, Before),
+       (once(search(Prover, Logic, Text, Proof)) -> Result = proved
+       ; Result = exhausted, Proof = none),
+       statistics(inferences, After), Inferences is After-Before,
+       nb_getval(showcase_calls, Calls)),
+      (unwrap_predicate(PI, showcase), nb_delete(showcase_calls))).
+
+count :-
+    (nb_current(showcase_calls, N) -> N1 is N+1, nb_setval(showcase_calls, N1) ; true).
+
+search(leanhat, ht, Text, unavailable) :- leanhat:prove_text(Text).
+search(nanocop, Logic, Text, Proof) :- nanocop:prove_text(Text, Logic, Proof).
+"""
+```
+
+```elixir
+dir = Path.join(System.tmp_dir!(), "swi-livebook-provers-#{System.pid()}")
+File.mkdir_p!(dir)
+
+for {file, source} <- [
+      {"leanhat.pl", leanhat},
+      {"nanocop.pl", nanocop},
+      {"prover_showcase.pl", diagnostics}
+    ] do
+  File.write!(Path.join(dir, file), source)
+end
+
+{:ok, session} = SWI.start_link(backend: backend)
+
+try do
+  :ok = SWI.load(session, Path.join(dir, "prover_showcase.pl"))
+after
+  File.rm_rf!(dir)
+end
+```
+
+To switch, run the final close cell and rerun from here. With NIF, run one
+prover experiment at a time because the diagnostics use shared predicates.
 
 ## Follow a quantified function chain
 
@@ -65,8 +168,8 @@ second assumption should establish `p(f(f(f(f(a)))))`.
 | `~A`                | negation                                 |
 | `all X:A`, `ex X:A` | universal and existential quantification |
 
-Generate this family of formulas in Elixir; the proof search stays in Prolog.
-The four-step instance adapts Otten's tutorial chain family.
+Start at `p(a)`. Substituting `a` for `X` yields `p(f(a))`. What must you
+substitute next? Generate the question in Elixir and let Prolog find the proof.
 
 ```elixir
 chain = fn steps ->
@@ -83,8 +186,17 @@ nanoCoP in HT and intuitionistic logic. Every run checks its expected verdict
 and records positive kernel call and inference counts.
 
 ```elixir
+prove = fn prover, logic, formula ->
+  text = :json.encode(formula) |> IO.iodata_to_binary()
+  goal = "prover_showcase:run(#{prover},#{logic},#{text},Result,Calls,Inferences,Proof)"
+  [answer] = SWI.query(session, goal) |> Enum.to_list()
+  assert answer["Calls"] > 0
+  assert answer["Inferences"] > 0
+  answer
+end
+
 run = fn name, prover, logic, formula, expected ->
-  answer = ProverShowcase.run(session, prover, logic, formula)
+  answer = prove.(prover, logic, formula)
   assert answer["Result"] == {:atom, expected}
   if prover == :nanocop and expected == "proved", do: assert(answer["Proof"] != [])
 
@@ -106,7 +218,7 @@ chain_results =
 Kino.DataTable.new(chain_results)
 ```
 
-The 20-step version is the longer tutorial instance. We run it in nanoCoP's
+The 20-step version gives the prover a longer chain. We run it in nanoCoP's
 intuitionistic mode; HT search can be much more expensive on this family.
 
 ```elixir
@@ -134,8 +246,8 @@ Four pigeons each occupy one of three holes. Some pair must share a hole.
 `o12` means pigeon 1 occupies hole 2. The antecedent states the alternatives
 for every pigeon; the consequent lists all possible pair collisions.
 
-This is the complete generator for the tutorial's four-by-three instance.
-There are four placement assumptions and eighteen candidate collisions.
+For one hole, six pairs of pigeons could collide. Before reading the loop,
+work out why three holes give eighteen candidate collisions.
 
 ```elixir
 pigeonhole = fn holes ->
@@ -169,10 +281,10 @@ Kino.DataTable.new(pigeon_results)
 
 ## Compare two logics
 
-HT and intuitionistic logic do not prove exactly the same formulas.
-These contrasting cases follow the [Otten/Schaub HT paper](https://arxiv.org/html/2601.03848v1);
-double-negation elimination is an additional standard negative control.
-Predict the outcomes before evaluating the editable case list.
+HT and intuitionistic logic do not prove exactly the same formulas. Start
+with prelinearity: could you construct a proof of either implication without
+knowing anything about `p` or `q`? Compare that with excluded middle, which
+fails in both logics here.
 
 ```elixir
 logic_cases = [
@@ -215,7 +327,7 @@ shown above directly. HT mode proves an intuitionistic translation instead.
 The notebook displays the term without independently checking the certificate.
 
 ```elixir
-proof = ProverShowcase.run(session, :nanocop, :intu, four_steps)
+proof = prove.(:nanocop, :intu, four_steps)
 assert proof["Proof"] != []
 Kino.Text.new(inspect(proof["Proof"], pretty: true, limit: :infinity))
 ```

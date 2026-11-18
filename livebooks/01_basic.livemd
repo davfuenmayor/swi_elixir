@@ -2,9 +2,11 @@
 
 ```elixir
 Mix.install([
-  {:swi_elixir, path: Path.expand("..", __DIR__)},
+  {:swi_elixir, github: "davfuenmayor/swi_elixir", branch: "main"},
   {:kino, "== 0.19.0"}
 ])
+
+Kino.nothing()
 ```
 
 ## Introduction
@@ -15,15 +17,13 @@ questions, reading values, loading a program, and releasing resources.
 performs unification and search. Elixir orchestrates the work and displays
 its results.
 
-Evaluate the notebook from top to bottom in a local Livebook runtime. Setup
-installs this checkout, its bundled SWI runtime, and Kino for tables and
-diagrams. On a [platform with an available bundle](../README.md#platforms-and-native-bundles), no separate SWI installation or compiler
-is needed. The initial Kino installation needs network access; examples use local data.
+Choose **Evaluate all** in Standalone. [All chapters and setup help](intro.livemd).
 
 For a tour of proof search, constraint programming, and program learning,
 start with the [tutorial chapters](intro.livemd).
 
 * [Start a session](#preliminaries-start-a-session)
+* [Unify or calculate?](#unify-or-calculate)
 * [Read results](#read-results-as-elixir-values)
 * [Load and query a program](#load-a-small-program)
 * [Control a lazy search](#stop-a-search-early)
@@ -31,9 +31,8 @@ start with the [tutorial chapters](intro.livemd).
 
 ## Preliminaries: start a session
 
-`SWI` is the public API for both backends. Choose `:port` for a separate SWI
-process or `:nif` for embedded SWI. The functions and returned values are the
-same. Change this setting before evaluating the workflow from the beginning.
+Start with `:port`. It gives your session its own SWI process. Want to try
+embedded SWI? Change `backend` to `:nif`. The calls and answers stay the same.
 
 ```elixir
 import ExUnit.Assertions
@@ -41,9 +40,8 @@ backend = :port
 {:ok, session} = SWI.start_link(backend: backend)
 ```
 
-Keep this session across cells so later queries can use loaded predicates.
-Before reevaluating a session-creation cell, close the previous session using
-the final cell. Restarting the notebook runtime also releases its sessions.
+Keep the session open as you work through the cells. To switch backends, run
+the final close cell, then rerun from here.
 
 ## Ask a question
 
@@ -57,6 +55,23 @@ ordinary Prolog text, with an optional final period.
 
 Both calls ran successfully. `false` means the search found no solution;
 parsing and execution errors use `{:error, reason}` instead.
+
+## Unify or calculate?
+
+Predict `X` in `X = 2+3` and `X is 2+3`. In Prolog, `=` matches terms.
+`is` evaluates the arithmetic expression on its right before matching.
+
+```elixir
+[%{"X" => term}] = Enum.to_list(SWI.query(session, "X = 2+3"))
+[%{"X" => value}] = Enum.to_list(SWI.query(session, "X is 2+3"))
+
+assert term == {:compound, "+", [2, 3]}
+assert value == 5
+%{unification: term, arithmetic: value}
+```
+
+Try `5 = 2+3` and `5 is 2+3` with `SWI.call/2`. The first compares a number
+with a compound term. The second compares two numbers.
 
 ## Read results as Elixir values
 
@@ -98,10 +113,14 @@ Our application needs to follow a chain of parent relationships. This is the
 complete program: `parent/2` supplies the edges, and `ancestor/2` follows one
 or more edges. The module keeps these names separate from other examples.
 
+Read `:-` as “if” and the comma as “and.” In the recursive clause, `Z` is the
+child you reach in one step. The rest of the path must start at that same `Z`.
+
 ```elixir
 family = ~S"""
 :- module(family, [parent/2, ancestor/2]).
 :- dynamic parent/2.
+:- retractall(parent(_, _)).
 parent(ada, grace).
 parent(grace, alan).
 parent(alan, emmy).
@@ -112,7 +131,9 @@ ancestor(X, Y) :- parent(X, Z), ancestor(Z, Y).
 
 `load/3` takes a filename. We create a temporary file from the visible source
 and remove it after loading; the predicates stay available in the session.
-The stable filename allows SWI to reconsult the module when you rerun the cell.
+The filename stays the same, so SWI can reconsult the module. The `retractall/1`
+directive resets the facts before loading them again, including in the shared
+NIF runtime.
 
 ```elixir
 path = Path.join(System.tmp_dir!(), "swi-livebook-family-#{System.pid()}.pl")
@@ -128,6 +149,7 @@ end
 ## Query the program
 
 Predict Ada's descendants before evaluating the next cell.
+For the second answer, try tracing `Z = grace` through the recursive clause.
 
 ```elixir
 descendants = SWI.query(session, "family:ancestor(ada, Who)") |> Enum.to_list()

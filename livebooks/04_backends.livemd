@@ -2,9 +2,11 @@
 
 ```elixir
 Mix.install([
-  {:swi_elixir, path: Path.expand("..", __DIR__)},
+  {:swi_elixir, github: "davfuenmayor/swi_elixir", branch: "main"},
   {:kino, "== 0.19.0"}
 ])
+
+Kino.nothing()
 ```
 
 ## Introduction
@@ -12,15 +14,9 @@ Mix.install([
 Port runs SWI in a separate process; NIF embeds it in the BEAM VM. Both use
 the same loading, calling, and streaming API. This chapter measures startup
 and repeated operations, then demonstrates timeout and crash recovery.
-The theorem workloads use [leanHaT](https://leancop.de/leanhat/) and
-[nanoCoP-i-HT](https://www.leancop.de/ihat/).
 
 Start with [Getting started](01_basic.livemd) if session ownership is new to
-you. Evaluate top to bottom in a runtime on a [supported platform](../README.md#platforms-and-native-bundles).
-Setup installs this checkout, its bundled SWI runtime, and Kino. Results are measured on your machine;
-this is a local boundary comparison, not a solver ranking.
-
-[All chapters](intro.livemd).
+you. Choose **Evaluate all** in Standalone. [All chapters and setup help](intro.livemd).
 
 * [Preliminaries](#preliminaries-scope-each-workflow)
 * [Measure startup and the first query](#measure-startup-and-the-first-query)
@@ -30,13 +26,13 @@ this is a local boundary comparison, not a solver ranking.
 
 ## Preliminaries: scope each workflow
 
-Each example below needs its own session. This small helper starts one and
-closes it in `after`, so a failed assertion also releases it. The callback's
-result is returned as an ordinary Elixir value.
+Run this once, then try the measurements. They use the same calls on both
+backends. The helper opens a fresh session each time and closes it even if a
+call fails. Keep the `halt/1` exercise on Port. With NIF it can stop Livebook's
+entire runtime.
 
 ```elixir
 import ExUnit.Assertions
-project = Path.expand("..", __DIR__)
 
 with_session = fn backend, fun ->
   {:ok, session} = SWI.start_link(backend: backend)
@@ -75,38 +71,34 @@ Rerunning the cell does not measure a fresh VM's first NIF initialization.
 
 ## Describe the workloads
 
-The tiny goal measures a small round trip. The 100-answer relation also
-exercises streaming and decoding. The two proof tasks adapt
-[Otten's tutorial](https://jens-otten.de/tutorial_tableaux19/examples/): a
-four-step function chain and four pigeons occupying three holes. Formula
-construction is visible here; solving uses the real vendored provers.
+Compare a goal that succeeds once, a generator that returns 100 integers,
+and a search that returns all 92 eight-queens boards. Before running, predict
+which workload will spend the largest share of its time passing answers to Elixir.
+
+Here is the whole search program. `all_distinct/1` handles rows. The recursive
+check handles diagonals. `labeling([ff], Rows)` tries variables with the smallest
+remaining domains first.
 
 ```elixir
-chain_formula = "(p(a),(all X:(p(X)=>p(f(X)))))=>p(f(f(f(f(a)))))"
+bench_program = ~S"""
+:- module(bench_queens, [placements/2]).
+:- use_module(library(clpfd)).
 
-placements =
-  for pigeon <- 1..4,
-      do: "(" <> Enum.map_join(1..3, ";", &"o#{pigeon}#{&1}") <> ")"
+placements(N, Rows) :-
+    length(Rows, N), Rows ins 1..N, all_distinct(Rows),
+    safe(Rows), labeling([ff], Rows).
 
-collisions =
-  for hole <- 1..3,
-      first <- 1..4,
-      second <- 1..4,
-      first < second,
-      do: "(o#{first}#{hole},o#{second}#{hole})"
-
-pigeon_formula =
-  "(" <> Enum.join(placements, ",") <> ")=>(" <> Enum.join(collisions, ";") <> ")"
-
-quote_formula = fn formula -> formula |> :json.encode() |> IO.iodata_to_binary() end
+safe([]).
+safe([Q|Qs]) :- diagonals(Qs, Q, 1), safe(Qs).
+diagonals([], _, _).
+diagonals([Q|Qs], Q0, D) :-
+    abs(Q0-Q) #\= D, D1 #= D+1, diagonals(Qs, Q0, D1).
+"""
 
 workloads = [
   {"Tiny goal", "true", 1},
-  {"100 solutions", "between(1,100,X)", 100},
-  {"leanHaT function chain", "once(leanhat:prove_text(#{quote_formula.(chain_formula)}))",
-   1},
-  {"nanoCoP HT pigeonhole",
-   "once(nanocop:prove_text(#{quote_formula.(pigeon_formula)},ht))", 1}
+  {"100 integers", "between(1,100,X)", 100},
+  {"Eight queens", "bench_queens:placements(8, Rows)", 92}
 ]
 
 Kino.DataTable.new(
@@ -117,16 +109,20 @@ Kino.DataTable.new(
 
 ## Measure repeated work
 
-Reuse one session per backend. Load only the shared integration adapters;
-they contain no task-specific formulas. Check each workload once before
-measurement and check the answer count during every timed run.
+Reuse one session per backend. Consult the inline program once, then time
+queries only. Each sample checks that both backends did the same work.
 
 ```elixir
 timings =
   for backend <- [:port, :nif] do
     with_session.(backend, fn session ->
-      for adapter <- ["leanhat.pl", "nanocop.pl"] do
-        :ok = SWI.load(session, Path.join([project, "examples", adapter]))
+      path = Path.join(System.tmp_dir!(), "swi-livebook-bench-#{System.pid()}.pl")
+      File.write!(path, bench_program)
+
+      try do
+        :ok = SWI.load(session, path)
+      after
+        File.rm!(path)
       end
 
       for {name, goal, expected} <- workloads do
@@ -156,10 +152,9 @@ timings =
 Kino.DataTable.new(timings, keys: [:workload, :backend, :median_us, :p95_us, :samples])
 ```
 
-Times include query parsing, proof preprocessing, transport, and Elixir
-decoding. These adapter calls do not install the kernel counters or return
-proof terms used in [the proof-search chapter](02_provers.livemd).
-Seven samples are a small illustration, not a reliable performance study.
+Times include Prolog search, transport, and Elixir decoding. Compare the
+100 integers with the 92 boards: the answer counts are close, but the work
+needed to produce each answer differs. Treat seven samples as a demonstration.
 
 ### Try it yourself
 
@@ -208,10 +203,11 @@ asserted before the crash is gone.
 crash_recovery =
   with_session.(:port, fn session ->
     {:ok, true} = SWI.call(session, "assertz(notebook_marker(ready))")
-    {:error, {:port_exit, 7}} = SWI.call(session, "halt(7)")
+    {:error, {:port_exit, status}} = SWI.call(session, "halt(7)")
+    assert is_integer(status) and status != 0
     {:ok, false} = SWI.call(session, "current_predicate(notebook_marker/1)")
     {:ok, true} = SWI.call(session, "true")
-    %{backend: :port, child_exit: 7, reconnected: true, previous_fact_retained: false}
+    %{backend: :port, child_exit: status, reconnected: true, previous_fact_retained: false}
   end)
 
 Kino.DataTable.new([crash_recovery])
@@ -233,5 +229,4 @@ retain one session across cells and close it explicitly.
 
 * [Constraint search](03_search.livemd): control how many answers a search produces.
 * [Metagol](05_metagol.livemd) and [Aleph](06_aleph.livemd): compare programs learned through both backends.
-* `mix run examples/bench.exs`: collect larger startup and latency distributions.
 * [All chapters](intro.livemd).

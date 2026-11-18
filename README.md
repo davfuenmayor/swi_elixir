@@ -1,6 +1,7 @@
 # swi_elixir
 
 [![Native SWI builds](https://github.com/davfuenmayor/swi_elixir/actions/workflows/native.yml/badge.svg?branch=main)](https://github.com/davfuenmayor/swi_elixir/actions/workflows/native.yml?query=branch%3Amain)
+[![Run in Livebook](https://livebook.dev/badge/v1/blue.svg)](https://livebook.dev/run?url=https%3A%2F%2Fgithub.com%2Fdavfuenmayor%2Fswi_elixir%2Fblob%2Fmain%2Flivebooks%2Fintro.livemd)
 
 Run SWI-Prolog from Elixir through a Port or a NIF. Both use the same API.
 
@@ -30,9 +31,16 @@ A session supports one active query. Exhaustion or `Enum.take/2` closes it. Use
 separate sessions for parallel searches. `timeout:` is in milliseconds and
 limits each pull (default 5,000). Timeouts do not roll back side effects.
 
-Port isolates crashes and can kill a worker that misses its deadline. Reload
-Prolog state after a reset. NIF sessions share ordinary predicates and modules
-inside the BEAM. Native cleanup can block on a Prolog cleanup handler.
+To swap backends, start a new session with `backend: :port` or `backend: :nif`
+and reload your program. The same calls, goals, and result shapes work with both.
+
+- **Port** gives each session its own SWI process. It can kill a stuck worker.
+  After a reset, reload your Prolog state. A `swipl:` override (or `SWIPL`) and
+  `cleanup_timeout:` apply here.
+- **NIF** embeds SWI in the BEAM. Sessions share ordinary predicates and modules.
+  Query timeouts still apply, but native cleanup can block.
+
+Use `halt/1` only with Port. In a NIF session it can terminate the BEAM.
 
 | Prolog | Elixir |
 | --- | --- |
@@ -45,7 +53,7 @@ inside the BEAM. Native cleanup can block on a Prolog cleanup handler.
 
 ## Livebooks
 
-Open [the index](livebooks/intro.livemd) from the checkout. Lessons cover queries,
-search, the backends, theorem proving, Metagol and Aleph.
+Open [the index](livebooks/intro.livemd) or use the badge above. Lessons cover
+queries, search, the backends, theorem proving, Metagol and Aleph.
 
 [MIT](LICENSE). See [third-party notices](THIRD_PARTY_NOTICES.md).
