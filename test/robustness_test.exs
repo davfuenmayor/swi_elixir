@@ -80,6 +80,7 @@ defmodule SWI.RobustnessTest do
       assert Process.alive?(s)
       assert Port.info(port) == nil
       assert :sys.get_state(s).active == nil
+      assert SWI.call(s, "true") == {:error, :session_reset}
       assert SWI.call(s, "true") == {:ok, true}
       refute :sys.get_state(s).transport == port
     end
@@ -94,15 +95,62 @@ defmodule SWI.RobustnessTest do
         SWI.call(s, "setup_call_cleanup(true,repeat,(repeat,fail))")
       end)
 
-    assert result == {:error, :timeout}
+    assert result == {:error, :port_timeout}
     assert elapsed < 2_000_000
     assert Port.info(port) == nil
+    assert SWI.call(s, "true") == {:error, :session_reset}
     assert SWI.call(s, "true") == {:ok, true}
+  end
+
+  test "Port uses the configured grace period for query timeout cleanup" do
+    goal = "setup_call_cleanup(true, (repeat, fail), sleep(1.2))"
+
+    for {grace, expected} <- [{100, :port_timeout}, {2_000, :timeout}] do
+      s = start_supervised!({SWI.Session, cleanup_timeout: grace}, id: grace)
+      assert :ok = SWI.load(s, "examples/family.pl")
+      port = :sys.get_state(s).transport
+
+      assert SWI.call(s, goal, timeout: 100) == {:error, expected}
+
+      if expected == :port_timeout do
+        assert Port.info(port) == nil
+        assert SWI.load(s, "examples/family.pl") == {:error, :session_reset}
+        assert SWI.call(s, "current_predicate(family:ancestor/2)") == {:ok, false}
+        assert :ok = SWI.load(s, "examples/family.pl")
+      else
+        assert :sys.get_state(s).transport == port
+      end
+
+      assert SWI.call(s, "family:ancestor(ada,emmy)") == {:ok, true}
+    end
+  end
+
+  test "Port reports a reset after a hard load timeout" do
+    s = start_supervised!({SWI.Session, cleanup_timeout: 100})
+    path = temporary("slow_load.pl")
+    File.write!(path, ":- initialization(setup_call_cleanup(true,(repeat,fail),sleep(0.5))).\n")
+
+    assert SWI.load(s, path, timeout: 100) == {:error, :port_timeout}
+    assert SWI.load(s, "examples/family.pl") == {:error, :session_reset}
+    assert :ok = SWI.load(s, "examples/family.pl")
+    assert SWI.call(s, "family:ancestor(ada,emmy)") == {:ok, true}
+  end
+
+  test "NIF waits for timeout cleanup and keeps the engine" do
+    s = start_supervised!({SWI.Session, backend: :nif, cleanup_timeout: 50})
+    assert :ok = SWI.load(s, "examples/family.pl")
+    engine = :sys.get_state(s).transport
+    goal = "setup_call_cleanup(true, (repeat, fail), (sleep(0.2), assertz(timeout_cleanup_done)))"
+
+    assert SWI.call(s, goal, timeout: 100) == {:error, :timeout}
+    assert :sys.get_state(s).transport == engine
+    assert SWI.call(s, "retract(timeout_cleanup_done), family:ancestor(ada,emmy)") == {:ok, true}
   end
 
   test "EOF partway through a multi-chunk reply retires the child" do
     s = start_supervised!({SWI.Session, fake_child(String.duplicate("x", 150_000), true)})
     assert {:error, {:port_exit, _}} = SWI.call(s, "true")
+    assert SWI.call(s, "true") == {:error, :session_reset}
     assert SWI.call(s, "true") == {:ok, true}
   end
 
@@ -147,7 +195,7 @@ defmodule SWI.RobustnessTest do
     """)
 
     {elapsed, result} = :timer.tc(fn -> SWI.start_link(bridge: bridge) end)
-    assert result == {:error, {:startup, {:error, :timeout}}}
+    assert result == {:error, {:startup, {:error, :port_timeout}}}
     assert elapsed < 3_000_000
     pid = File.read!(pid_file)
     wait_until(fn -> not os_process_alive?(pid) end)
@@ -216,14 +264,17 @@ defmodule SWI.RobustnessTest do
     assert output =~ "call_with_time_limit"
   end
 
-  test "a failed native request retires its resource and reconnects" do
+  test "a failed native request reports a reset before opening another engine" do
     s = start_supervised!({SWI.Session, backend: :nif})
+    assert :ok = SWI.load(s, "examples/family.pl")
     resource = :sys.get_state(s).transport
     assert :ok = SWI.Native.close(resource)
     assert SWI.call(s, "true") == {:error, :closed}
     assert :sys.get_state(s).transport == nil
     assert :sys.get_state(s).active == nil
-    assert SWI.call(s, "true") == {:ok, true}
+    assert SWI.load(s, "examples/family.pl") == {:error, :session_reset}
+    assert :sys.get_state(s).transport == nil
+    assert SWI.call(s, "family:ancestor(ada,emmy)") == {:ok, true}
   end
 
   test "bridge serialization failures become Prolog errors and release the cursor" do

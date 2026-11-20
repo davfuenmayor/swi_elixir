@@ -190,16 +190,16 @@ recovery =
 Kino.DataTable.new(recovery)
 ```
 
-Port also has an external transport deadline with a one-second grace period.
-If it fires, the child is killed and its database is lost. NIF cannot safely
-kill arbitrary foreign code or cleanup handlers that do not service signals.
-Use Port when a hard deadline or native crash isolation is required.
+Port gives Prolog one extra second to reply by default. Set
+`cleanup_timeout:` when starting the session to adjust that grace period.
+If the reply still hasn't arrived, Port returns `:port_timeout` and kills
+the child. An embedded NIF session can still block in native code or cleanup.
 
 ## Observe Port crash recovery
 
 This example deliberately calls `halt/1` **only in a Port session**. It exits
-the disposable SWI child. The next request starts a fresh child, so a fact
-asserted before the crash is gone.
+the SWI process. The next request reports `:session_reset`. A subsequent
+request starts a fresh process, so a fact asserted before the crash is gone.
 
 ```elixir
 crash_recovery =
@@ -207,6 +207,7 @@ crash_recovery =
     {:ok, true} = SWI.call(session, "assertz(notebook_marker(ready))")
     {:error, {:port_exit, status}} = SWI.call(session, "halt(7)")
     assert is_integer(status) and status != 0
+    {:error, :session_reset} = SWI.call(session, "current_predicate(notebook_marker/1)")
     {:ok, false} = SWI.call(session, "current_predicate(notebook_marker/1)")
     {:ok, true} = SWI.call(session, "true")
     %{backend: :port, child_exit: status, reconnected: true, previous_fact_retained: false}

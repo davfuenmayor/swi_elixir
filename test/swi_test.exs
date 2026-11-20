@@ -174,12 +174,13 @@ defmodule SWITest do
     assert Task.await(task) == {:error, :timeout}
   end
 
-  test "Port crash is isolated and the next request starts a fresh runtime" do
+  test "Port crash reports a reset before the next runtime starts" do
     s = start_supervised!({SWI.Session, backend: :port})
     assert :ok == SWI.load(s, "examples/family.pl")
     assert {:error, {:port_exit, status}} = SWI.call(s, "halt(7)")
     assert is_integer(status) and status != 0
     assert Process.alive?(s)
+    assert {:error, :session_reset} = SWI.call(s, "true")
     assert {:ok, true} = SWI.call(s, "true")
     assert {:error, {:prolog, _}} = SWI.call(s, "family:ancestor(ada,emmy)")
     assert :ok == SWI.load(s, "examples/family.pl")
@@ -191,10 +192,11 @@ defmodule SWITest do
     assert {:ok, true} = SWI.call(s, "assertz(marker)")
     original = :sys.get_state(s).transport
 
-    assert {:error, :timeout} =
+    assert {:error, :port_timeout} =
              SWI.call(s, "catch((repeat,fail),time_limit_exceeded,(repeat,fail))", timeout: 30)
 
     assert Port.info(original) == nil
+    assert {:error, :session_reset} = SWI.call(s, "true")
     assert {:ok, true} = SWI.call(s, "true")
     assert :sys.get_state(s).transport != original
   end

@@ -3,7 +3,9 @@ defmodule SWI do
 
   @doc """
   Start a persistent session. Options: `:backend` (`:port` by default), `:name`,
-  `:swipl`, `:bridge`, and positive `:cleanup_timeout` milliseconds (Port only).
+  `:swipl`, `:bridge`, and positive `:cleanup_timeout` milliseconds (Port only,
+  default 1,000). This is the extra reply time after a query or load deadline.
+  It also contributes to the cursor close deadline.
   Native admission can return `{:error, :native_capacity}` when its 64 engine
   slots are occupied, including engines still undergoing GC cleanup.
   """
@@ -18,6 +20,7 @@ defmodule SWI do
   Failed initialization or directives return an error; other warnings are
   nonfatal. Failed loads may leave partial code and side effects behind.
   `:timeout` is positive milliseconds, defaulting to 5,000.
+  Timeouts and resets follow the same rules as `query/3`.
   """
   def load(session, path, opts \\ []) do
     path = path |> IO.chardata_to_string() |> text!() |> Path.expand()
@@ -29,9 +32,14 @@ defmodule SWI do
   and trailing comments are optional; extra terms are rejected before execution.
   Invalid UTF-8 raises `ArgumentError` in the caller. One enumeration owns each
   session. `:timeout` bounds each search pull, excluding consumer and close time.
-  Prolog/transport errors raise `SWI.Error`. After an unnoticed transport loss,
-  the next operation reports `:session_reset` before a later request reconnects;
-  reload lost state explicitly. Monitor the concrete PID for supervised restarts.
+  Prolog and transport errors raise `SWI.Error`. A Prolog `:timeout` leaves
+  the session alive. NIF waits for Prolog to finish unwinding. With Port,
+  `:port_timeout` means the reply deadline expired and the SWI process was
+  killed. If the wrapper loses or discards the process or engine, the next
+  query or load reports `:session_reset` once before a later request reconnects.
+  Reload files after Port loss. Ordinary modules and predicates are shared
+  across NIF engines and can survive an engine reset. Monitor the concrete PID
+  for supervised restarts.
   """
   def query(session, goal, opts \\ []) when is_binary(goal) do
     goal = text!(goal)

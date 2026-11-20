@@ -63,6 +63,21 @@ defmodule SWI.NativeFailureTest do
     {:ok, _} = SWI.Native.request(resource, ~s|{"op":"hello","timeout":1}|)
     :ok = SWI.Native.close(resource)
     %{engines: 0} = SWI.Native.stats()
+
+    {:ok, session} = SWI.start_link(backend: :nif)
+
+    for _ <- 1..50 do
+      System.put_env("SWI_NIF_FAIL", "binary")
+      {:error, :out_of_memory} = SWI.call(session, "true")
+      System.delete_env("SWI_NIF_FAIL")
+
+      {:error, :session_reset} = SWI.call(session, "true")
+      %{engines: 0, reapers: 0, quarantined: 0} = SWI.Native.stats()
+      {:ok, true} = SWI.call(session, "true")
+    end
+
+    :ok = SWI.stop(session)
+    %{engines: 0, reapers: 0, quarantined: 0} = SWI.Native.stats()
     """)
   end
 

@@ -29,16 +29,24 @@ enumeration. `call/3` returns `{:ok, boolean}` or `{:error, reason}`.
 
 A session supports one active query. Exhaustion or `Enum.take/2` closes it. Use
 separate sessions for parallel searches. `timeout:` is in milliseconds and
-limits each pull (default 5,000). Timeouts do not roll back side effects.
+sets Prolog's deadline for each pull (default 5,000). A Prolog `:timeout`
+leaves the session alive. Timeouts do not roll back side effects.
 
 To swap backends, start a new session with `backend: :port` or `backend: :nif`
 and reload your program. The same calls, goals, and result shapes work with both.
 
-- **Port** gives each session its own SWI process. It can kill a stuck worker.
-  After a reset, reload your Prolog state. A `swipl:` override (or `SWIPL`) and
-  `cleanup_timeout:` apply here.
+- **Port** gives each session its own SWI process. `:port_timeout` means Elixir
+  killed the process after waiting `timeout + cleanup_timeout` on a query or
+  load. The grace period defaults to 1,000 ms. Use `swipl:` or `SWIPL` to
+  override the executable.
 - **NIF** embeds SWI in the BEAM. Sessions share ordinary predicates and modules.
-  Query timeouts still apply, but native cleanup can block.
+  A timed-out goal returns once cleanup finishes. A stuck native call or
+  cleanup can retain an engine and keep using CPU. Use Port when you need
+  to reclaim those resources at a deadline.
+
+If the wrapper loses or discards a process or engine, the next query or load
+reports `:session_reset` once before a later request reconnects. Reload your
+files after Port loss. Shared Prolog state can survive a NIF engine reset.
 
 Use `halt/1` only with Port. In a NIF session it can terminate the BEAM.
 

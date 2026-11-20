@@ -79,10 +79,10 @@ defmodule SWI.Session do
   end
 
   def handle_info({port, {:exit_status, _}}, %{transport: port, backend: :port} = state),
-    do: {:noreply, %{release(state) | transport: nil, reset: true}}
+    do: {:noreply, disconnect(state)}
 
   def handle_info({:EXIT, port, _}, %{transport: port, backend: :port} = state),
-    do: {:noreply, %{release(state) | transport: nil, reset: true}}
+    do: {:noreply, disconnect(state)}
 
   def handle_info(_, state), do: {:noreply, state}
 
@@ -114,10 +114,10 @@ defmodule SWI.Session do
     %{state | active: nil}
   end
 
-  defp cleanup_seconds(state), do: Keyword.get(state.opts, :cleanup_timeout, 1_000) / 1000
+  defp cleanup_timeout(state), do: Keyword.get(state.opts, :cleanup_timeout, 1_000)
 
   defp validate_and_connect(state) do
-    case Keyword.get(state.opts, :cleanup_timeout, 1_000) do
+    case cleanup_timeout(state) do
       ms when is_integer(ms) and ms > 0 -> connect(state)
       _ -> {:error, :invalid_cleanup_timeout}
     end
@@ -216,15 +216,9 @@ defmodule SWI.Session do
           SWI.Native.request(state.transport, encoded)
 
         :port ->
-          seconds =
-            if request.op == "close",
-              do: cleanup_seconds(state),
-              else: Map.get(request, :timeout, 5)
-
-          deadline = trunc(seconds * 1000) + 1_000
-
           try do
             Port.command(state.transport, [encoded, "\n"])
+            deadline = port_reply_timeout(state, request)
             receive_line(state.transport, "", System.monotonic_time(:millisecond) + deadline)
           rescue
             ArgumentError -> {:error, :port_down}
@@ -242,6 +236,14 @@ defmodule SWI.Session do
     end
   end
 
+  defp port_reply_timeout(state, %{op: op, timeout: seconds}) when op in ["next", "load"],
+    do: round(seconds * 1000) + cleanup_timeout(state)
+
+  defp port_reply_timeout(state, %{op: "close"}), do: cleanup_timeout(state) + 1_000
+
+  defp port_reply_timeout(_state, request),
+    do: round(Map.get(request, :timeout, 5) * 1000) + 1_000
+
   defp retire(state) do
     case {state.backend, state.transport} do
       {_, nil} -> :ok
@@ -249,8 +251,11 @@ defmodule SWI.Session do
       {:nif, engine} -> log_cleanup(SWI.Native.close(engine))
     end
 
-    %{release(state) | transport: nil}
+    disconnect(state)
   end
+
+  defp disconnect(state),
+    do: %{release(state) | transport: nil, reset: true}
 
   defp decode_reply(json, op) do
     decode(:json.decode(json), op)
@@ -258,14 +263,20 @@ defmodule SWI.Session do
     _ -> {:error, :invalid_reply}
   end
 
-  defp receive_line(port, acc, timeout) do
-    receive do
-      {^port, {:data, {:eol, line}}} -> {:ok, acc <> line}
-      {^port, {:data, {:noeol, line}}} -> receive_line(port, acc <> line, timeout)
-      {^port, {:exit_status, status}} -> {:error, {:port_exit, status}}
-      {:EXIT, ^port, reason} -> {:error, {:port_exit, reason}}
-    after
-      max(timeout - System.monotonic_time(:millisecond), 0) -> {:error, :timeout}
+  defp receive_line(port, acc, deadline) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining > 0 do
+      receive do
+        {^port, {:data, {:eol, line}}} -> {:ok, acc <> line}
+        {^port, {:data, {:noeol, line}}} -> receive_line(port, acc <> line, deadline)
+        {^port, {:exit_status, status}} -> {:error, {:port_exit, status}}
+        {:EXIT, ^port, reason} -> {:error, {:port_exit, reason}}
+      after
+        remaining -> {:error, :port_timeout}
+      end
+    else
+      {:error, :port_timeout}
     end
   end
 
