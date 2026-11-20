@@ -19,23 +19,28 @@ For a system SWI executable, set `SWIPL` or pass `swipl:` to a Port session.
 
 ## Release
 
-1. Set the wrapper version in `mix.exs`. Run native CI and collect the five
-   archives, checksums and build records from one run. CI installs the package
-   and runs both backends per target. Linux x86-64 also runs the full suite.
-2. Generate the manifest. Commit it and push the matching tag.
+1. Set the wrapper version in `mix.exs` on a release branch. Run native CI
+   and collect the five archives, checksums and build records from one run.
+   CI installs the package and runs both backends per target. Linux x86-64
+   also runs the full suite.
+2. Set `artifacts` to the download directory and `tag` to the wrapper
+   version with a `v` prefix. Generate the manifest, commit it and push the tag.
 
    ```sh
-   elixir scripts/prepare_native_manifest.exs /path/to/artifacts v0.1.0 > native/manifest.json
+   elixir scripts/prepare_native_manifest.exs "$artifacts" "$tag" > "$artifacts/manifest.json" &&
+     cp "$artifacts/manifest.json" native/manifest.json
    ```
 
-3. Create and publish the reviewed draft release. Use the tag matching `mix.exs`.
+3. Create the draft release. Review the five archives and their sidecars
+   before publishing.
 
    ```sh
-   SWI_ARTIFACT_DIR=/path/to/artifacts elixir scripts/publish_native.exs
+   SWI_ARTIFACT_DIR="$artifacts" elixir scripts/publish_native.exs
    ```
 
-4. On each target, install from an empty cache with `SWI_ELIXIR_BUNDLE` unset.
-   Check both backends, then publish Hex. Runtime archives stay out of Git and Hex.
+4. Verify the public downloads, then fast-forward `main`. For a Hex release,
+   install from an empty cache with `SWI_ELIXIR_BUNDLE` unset and check both
+   backends before publishing. Runtime archives stay out of Git and Hex.
 
    ```sh
    mix hex.build -o swi.tar
