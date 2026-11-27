@@ -37,8 +37,9 @@ and reload your program. The same calls, goals, and result shapes work with both
 
 - **Port** gives each session its own SWI process. `:port_timeout` means Elixir
   killed the process after waiting `timeout + cleanup_timeout` on a query or
-  load. The grace period defaults to 1,000 ms. Use `swipl:` or `SWIPL` to
-  override the executable.
+  load. The grace period defaults to 1,000 ms. Startup has a separate
+  `startup_timeout:` setting with a default of 10,000 ms. Use `swipl:`
+  or `SWIPL` to override the executable.
 - **NIF** embeds SWI in the BEAM. Sessions share ordinary predicates and modules.
   A timed-out goal returns once cleanup finishes. A stuck native call or
   cleanup can retain an engine and keep using CPU. Use Port when you need

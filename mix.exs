@@ -60,11 +60,11 @@ defmodule Mix.Tasks.Compile.SwiNative do
     {archive, expected} =
       case System.get_env("SWI_ELIXIR_BUNDLE") do
         nil -> release_bundle(target)
-        path -> {path, File.read!(path <> ".sha256") |> String.trim()}
+        path -> local_bundle(path)
       end
 
     unless valid_archive?(archive, expected),
-      do: Mix.raise("SWI runtime archive checksum mismatch")
+      do: Mix.raise("SWI runtime archive checksum mismatch for #{archive}")
 
     required = [
       "boot.prc",
@@ -157,6 +157,23 @@ defmodule Mix.Tasks.Compile.SwiNative do
     end
   end
 
+  defp local_bundle(path) do
+    unless File.regular?(path), do: Mix.raise("SWI_ELIXIR_BUNDLE archive not found at #{path}")
+
+    checksum = path <> ".sha256"
+
+    case File.read(checksum) do
+      {:ok, hash} ->
+        {path, String.trim(hash)}
+
+      {:error, reason} ->
+        Mix.raise(
+          "Cannot read SWI bundle checksum #{checksum} (#{:file.format_error(reason)}). " <>
+            "Keep the .sha256 file beside the archive."
+        )
+    end
+  end
+
   @doc false
   def release_bundle(target, manifest \\ JSON.decode!(File.read!("native/manifest.json"))) do
     unless manifest["schema"] == 1 and manifest["source_sha256"] == source_fingerprint(),
@@ -184,23 +201,16 @@ defmodule Mix.Tasks.Compile.SwiNative do
     path = Path.join([cache, hash, file])
 
     unless valid_archive?(path, hash) do
-      base =
-        System.get_env(
-          "SWI_RELEASE_BASE_URL",
-          "https://github.com/davfuenmayor/swi_elixir/releases/download"
-        )
-
-      download_archive!(
-        String.trim_trailing(base, "/") <> "/" <> release <> "/" <> file,
-        path,
-        hash
-      )
+      base = "https://github.com/davfuenmayor/swi_elixir/releases/download"
+      suffix = "/#{release}/#{file}"
+      mirror = System.get_env("SWI_RELEASE_BASE_URL", base)
+      download_archive!(String.trim_trailing(mirror, "/") <> suffix, path, hash, base <> suffix)
     end
 
     {path, hash}
   end
 
-  defp download_archive!(url, path, hash) do
+  defp download_archive!(url, path, hash, release_url) do
     uri = URI.parse(url)
 
     unless uri.scheme == "https" or
@@ -210,30 +220,23 @@ defmodule Mix.Tasks.Compile.SwiNative do
     {:ok, _} = Application.ensure_all_started(:inets)
     {:ok, _} = Application.ensure_all_started(:ssl)
 
-    ssl = [
-      verify: :verify_peer,
-      cacerts: :public_key.cacerts_get(),
-      customize_hostname_check: [match_fun: :public_key.pkix_verify_hostname_match_fun(:https)]
-    ]
-
     data =
-      case :httpc.request(
-             :get,
-             {String.to_charlist(url), []},
-             [ssl: ssl, timeout: 120_000, connect_timeout: 15_000],
-             body_format: :binary
-           ) do
-        {:ok, {{_, 200, _}, _, data}} ->
-          data
-
-        error ->
-          Mix.raise(
-            "Cannot download SWI artifact #{url}: #{inspect(error)}. See MULTIPLATFORM.md or set SWI_ELIXIR_BUNDLE."
-          )
+      with {:ok, ssl} <- download_ssl_options(),
+           {:ok, {{_, 200, _}, _, data}} <-
+             :httpc.request(
+               :get,
+               {String.to_charlist(url), []},
+               [ssl: ssl, timeout: 120_000, connect_timeout: 15_000],
+               body_format: :binary
+             ) do
+        data
+      else
+        {:ok, {{_, status, _}, _, _}} -> download_error!(url, release_url, "HTTP #{status}")
+        {:error, reason} -> retry_download!(uri.scheme, url, release_url, reason)
       end
 
     unless Base.encode16(:crypto.hash(:sha256, data), case: :lower) == hash,
-      do: Mix.raise("Downloaded SWI archive checksum mismatch")
+      do: download_error!(url, release_url, "archive checksum mismatch")
 
     File.mkdir_p!(Path.dirname(path))
     temporary = path <> ".#{System.pid()}.#{System.unique_integer([:positive])}.tmp"
@@ -262,6 +265,54 @@ defmodule Mix.Tasks.Compile.SwiNative do
     after
       File.rm(temporary)
     end
+  end
+
+  defp download_ssl_options do
+    {:ok,
+     [
+       verify: :verify_peer,
+       cacerts: :public_key.cacerts_get(),
+       customize_hostname_check: [match_fun: :public_key.pkix_verify_hostname_match_fun(:https)]
+     ]}
+  rescue
+    error -> {:error, "Cannot load trusted CA certificates (#{Exception.message(error)})"}
+  end
+
+  defp retry_download!(scheme, url, release_url, reason) do
+    reason = if is_binary(reason), do: reason, else: inspect(reason)
+
+    case scheme == "https" && System.find_executable("curl") do
+      curl when is_binary(curl) ->
+        args =
+          ~w(-q -fsSL --connect-timeout 15 --max-time 120 --proto =https --proto-redir =https)
+
+        case run_curl(curl, args ++ ["--", url]) do
+          {data, 0} -> data
+          {error, _} -> download_error!(url, release_url, "#{reason}\n#{String.trim(error)}")
+        end
+
+      _ ->
+        download_error!(url, release_url, reason)
+    end
+  end
+
+  defp run_curl(curl, args) do
+    System.cmd(curl, args, stderr_to_stdout: true)
+  rescue
+    error in ErlangError -> {"Cannot run curl (#{Exception.message(error)})", 1}
+  end
+
+  defp download_error!(url, release_url, reason) do
+    Mix.raise("""
+    Cannot download SWI bundle from #{url}
+    #{reason}
+
+    For a manual install, save both files in the same directory.
+      #{release_url}
+      #{release_url}.sha256
+    Add this before Mix.install in Setup.
+      System.put_env("SWI_ELIXIR_BUNDLE", "/absolute/path/to/archive.tar.gz")
+    """)
   end
 
   def clean do

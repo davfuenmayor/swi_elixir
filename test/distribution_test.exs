@@ -4,7 +4,7 @@ defmodule SWI.DistributionTest do
 
   @moduletag :tmp_dir
   setup %{tmp_dir: directory} do
-    keys = ~w(SWI_CACHE_DIR SWI_RELEASE_BASE_URL)
+    keys = ~w(SWI_CACHE_DIR SWI_RELEASE_BASE_URL SWI_ELIXIR_BUNDLE)
     previous = Map.new(keys, &{&1, System.get_env(&1)})
     System.put_env("SWI_CACHE_DIR", directory)
 
@@ -57,6 +57,28 @@ defmodule SWI.DistributionTest do
     end
   end
 
+  test "a failed download names both release files and where to set the override" do
+    error =
+      assert_raise Mix.Error, fn ->
+        fetch("bad response body", manifest("expected"), "404 Not Found")
+      end
+
+    url = "https://github.com/davfuenmayor/swi_elixir/releases/download/v0.1.0/swi-fixture.tar.gz"
+    assert Exception.message(error) =~ "HTTP 404"
+    assert Exception.message(error) =~ "\n  #{url}\n  #{url}.sha256"
+    assert Exception.message(error) =~ "before Mix.install in Setup"
+    refute Exception.message(error) =~ "bad response body"
+  end
+
+  test "a local archive needs its adjacent checksum file", %{tmp_dir: directory} do
+    path = Path.join(directory, "bundle.tar.gz")
+    System.put_env("SWI_ELIXIR_BUNDLE", path)
+    assert_raise Mix.Error, ~r/archive not found/, fn -> Compiler.run([]) end
+
+    File.write!(path, "fixture")
+    assert_raise Mix.Error, ~r/bundle.tar.gz.sha256/, fn -> Compiler.run([]) end
+  end
+
   defp manifest(data) do
     hash = :crypto.hash(:sha256, data) |> Base.encode16(case: :lower)
 
@@ -68,7 +90,7 @@ defmodule SWI.DistributionTest do
     }
   end
 
-  defp fetch(data, manifest) do
+  defp fetch(data, manifest, status \\ "200 OK") do
     {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, ip: {127, 0, 0, 1}])
     {:ok, {_, port}} = :inet.sockname(listener)
 
@@ -79,7 +101,7 @@ defmodule SWI.DistributionTest do
 
         :ok =
           :gen_tcp.send(socket, [
-            "HTTP/1.1 200 OK\r\nContent-Length: #{byte_size(data)}\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 #{status}\r\nContent-Length: #{byte_size(data)}\r\nConnection: close\r\n\r\n",
             data
           ])
 

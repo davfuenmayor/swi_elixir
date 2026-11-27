@@ -115,13 +115,22 @@ defmodule SWI.Session do
   end
 
   defp cleanup_timeout(state), do: Keyword.get(state.opts, :cleanup_timeout, 1_000)
+  defp startup_timeout(state), do: Keyword.get(state.opts, :startup_timeout, 10_000)
 
   defp validate_and_connect(state) do
-    case cleanup_timeout(state) do
-      ms when is_integer(ms) and ms > 0 -> connect(state)
-      _ -> {:error, :invalid_cleanup_timeout}
+    cond do
+      not positive_milliseconds?(cleanup_timeout(state)) ->
+        {:error, :invalid_cleanup_timeout}
+
+      state.backend == :port and not positive_milliseconds?(startup_timeout(state)) ->
+        {:error, :invalid_startup_timeout}
+
+      true ->
+        connect(state)
     end
   end
+
+  defp positive_milliseconds?(value), do: is_integer(value) and value > 0
 
   defp ready(state) do
     case rpc(state, %{op: "hello", timeout: 1}) do
@@ -240,6 +249,8 @@ defmodule SWI.Session do
     do: round(seconds * 1000) + cleanup_timeout(state)
 
   defp port_reply_timeout(state, %{op: "close"}), do: cleanup_timeout(state) + 1_000
+
+  defp port_reply_timeout(state, %{op: "hello"}), do: startup_timeout(state)
 
   defp port_reply_timeout(_state, request),
     do: round(Map.get(request, :timeout, 5) * 1000) + 1_000

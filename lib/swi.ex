@@ -6,6 +6,8 @@ defmodule SWI do
   `:swipl`, `:bridge`, and positive `:cleanup_timeout` milliseconds (Port only,
   default 1,000). This is the extra reply time after a query or load deadline.
   It also contributes to the cursor close deadline.
+  Port waits up to `:startup_timeout` milliseconds for the readiness reply
+  (positive integer, default 10,000).
   Native admission can return `{:error, :native_capacity}` when its 64 engine
   slots are occupied, including engines still undergoing GC cleanup.
   """

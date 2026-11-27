@@ -165,6 +165,7 @@ defmodule SWI.RobustnessTest do
     assert reason in [{:port_exit, 0} | interrupted]
     assert {:error, :invalid_cleanup_timeout} = SWI.start_link(cleanup_timeout: 0)
     assert {:error, :invalid_cleanup_timeout} = SWI.start_link(cleanup_timeout: 1.5)
+    assert {:error, :invalid_startup_timeout} = SWI.start_link(startup_timeout: 0)
 
     bridge = temporary("broken.pl")
     File.write!(bridge, ":- initialization(halt(19)).\n")
@@ -181,6 +182,13 @@ defmodule SWI.RobustnessTest do
     assert reason in [{:port_exit, 20} | interrupted]
   end
 
+  test "Port starts when the readiness reply takes longer than two seconds" do
+    bridge = temporary("slow-start.pl")
+    File.write!(bridge, File.read!("priv/bridge.pl") <> "\n:- initialization(sleep(2.2)).\n")
+    s = start_supervised!({SWI.Session, bridge: bridge})
+    assert SWI.call(s, "true") == {:ok, true}
+  end
+
   test "readiness is bounded and failed children are killed" do
     Process.flag(:trap_exit, true)
     bridge = temporary("silent-child.pl")
@@ -194,7 +202,9 @@ defmodule SWI.RobustnessTest do
             sleep(60).
     """)
 
-    {elapsed, result} = :timer.tc(fn -> SWI.start_link(bridge: bridge) end)
+    {elapsed, result} =
+      :timer.tc(fn -> SWI.start_link(bridge: bridge, startup_timeout: 2_000) end)
+
     assert result == {:error, {:startup, {:error, :port_timeout}}}
     assert elapsed < 3_000_000
     pid = File.read!(pid_file)
