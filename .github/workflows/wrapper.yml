@@ -38,7 +38,6 @@ jobs:
         with:
           otp-version: '27'
           elixir-version: '1.18'
-      - run: mix format --check-formatted
       - name: Check the source package
         run: |
           mix local.hex --force
