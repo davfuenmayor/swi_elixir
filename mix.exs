@@ -4,7 +4,7 @@ defmodule SWIElixir.MixProject do
   def project do
     [
       app: :swi_elixir,
-      version: "0.1.1",
+      version: "0.1.2",
       description: "An Elixir wrapper for SWI-Prolog with Port and NIF backends",
       elixir: "~> 1.18",
       deps: [],

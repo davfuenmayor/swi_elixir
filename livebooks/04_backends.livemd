@@ -2,7 +2,7 @@
 
 ```elixir
 Mix.install([
-  {:swi_elixir, github: "davfuenmayor/swi_elixir", branch: "main"},
+  {:swi_elixir, "== 0.1.2"},
   {:kino, "== 0.19.0"}
 ])
 

@@ -2,20 +2,86 @@
 
 ```elixir
 Mix.install([
-  {:swi_elixir, github: "davfuenmayor/swi_elixir", branch: "main"},
+  {:swi_elixir, "== 0.1.2"},
   {:kino, "== 0.19.0"}
 ])
 
-project = Path.join(Mix.install_project_dir(), "deps/swi_elixir")
+# Compressed upstream Prolog source from vendor/metagol/metagol.pl.
+engine =
+  ~S"""
+  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
+  """
+  |> Base.decode64!(ignore: :whitespace)
+  |> :zlib.gunzip()
 
-Code.require_file(Path.join(project, "examples/ilp.exs"))
+run_inline = fn backend, files, entries, goal ->
+  directory = Path.join(System.tmp_dir!(), "swi-ilp-#{System.pid()}")
+  File.mkdir_p!(directory)
 
-engine = Path.join(project, "vendor/metagol/metagol.pl")
-engine_import = ":- use_module(" <> IO.iodata_to_binary(:json.encode(engine)) <> ")."
+  try do
+    for {name, source} <- files, do: File.write!(Path.join(directory, name), source)
+    {:ok, session} = SWI.start_link(backend: backend)
+
+    try do
+      for name <- entries, do: :ok = SWI.load(session, Path.join(directory, name))
+      [result] = SWI.query(session, goal.(directory), timeout: 15_000) |> Enum.to_list()
+      true = result["Inferences"] > 0
+
+      rows =
+        for {:compound, "result", [{:atom, split}, goal, {:atom, expected}, {:atom, actual}]} <-
+              result["Rows"] do
+          %{split: split, goal: goal, expected: expected == "true", actual: actual == "true"}
+        end
+
+      Map.put(result, "Rows", rows)
+    after
+      SWI.stop(session)
+    end
+  after
+    File.rm_rf!(directory)
+  end
+end
 
 adapter = ~S"""
 :- module(metagol_ilp, [learn_task/7]).
-""" <> engine_import <> "\n" <> ~S"""
+:- use_module(metagol).
 :- use_module(ilp_support).
 
 % Upstream Metagol resolves primitives in user. Prefix these demonstration hooks.
@@ -112,12 +178,13 @@ example(_, _, Tests, test, Goal, Expected) :- member(Goal-Expected, Tests).
 
 learn = fn task, budget, source, selected ->
   files = %{
+    "metagol.pl" => engine,
     "ilp_support.pl" => evaluation,
     "metagol_ilp.pl" => adapter,
     "metagol_tasks.pl" => source
   }
 
-  ILPShowcase.run_inline(selected, files, ["metagol_ilp.pl", "metagol_tasks.pl"], fn _ ->
+  run_inline.(selected, files, ["metagol_ilp.pl", "metagol_tasks.pl"], fn _ ->
     """
     statistics(inferences, Before),
     metagol_ilp:learn_task(#{task}, #{budget}, Status, Program, Rows, Clauses, Trace),

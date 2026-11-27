@@ -7,13 +7,13 @@ Standalone runtime, then work through the cells in order. The first run needs
 internet to fetch dependencies and the SWI runtime. After setup, the examples
 run locally.
 
-The lessons install the wrapper from GitHub. Setup needs a published bundle for
+The lessons install SWI Elixir 0.1.2 from Hex. Setup needs a published bundle for
 your platform or a local archive. See the
 [build guide](https://github.com/davfuenmayor/swi_elixir/blob/main/MULTIPLATFORM.md).
 
 Read the question before running its cell, then change one input and try again.
-The lesson programs, queries and data are in the cells. Proof search includes
-its provers in Setup. The learner chapters use the vendored engines.
+The lesson programs, queries and data are in the cells. The prover and learner
+notebooks include their engines in Setup.
 
 ## Chapters
 

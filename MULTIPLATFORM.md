@@ -38,9 +38,10 @@ For a system SWI executable, set `SWIPL` or pass `swipl:` to a Port session.
    SWI_ARTIFACT_DIR="$artifacts" elixir scripts/publish_native.exs
    ```
 
-4. Verify the public downloads, then fast-forward `main`. For a Hex release,
-   install from an empty cache with `SWI_ELIXIR_BUNDLE` unset and check both
-   backends before publishing. Runtime archives stay out of Git and Hex.
+4. Verify the public downloads and check both backends from an empty cache
+   with `SWI_ELIXIR_BUNDLE` unset. Publish to Hex before fast-forwarding
+   `main` so the Livebooks can resolve their pinned version. Runtime archives
+   stay out of Git and Hex.
 
    ```sh
    mix hex.build -o swi.tar
