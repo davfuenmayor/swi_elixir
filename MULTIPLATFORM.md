@@ -17,6 +17,10 @@ Keep the `.sha256` sidecar. `SWI_ARTIFACT_DIR` sets the build output directory.
 `SWI_CACHE_DIR` sets the download cache. Restart the BEAM after replacing a NIF.
 For a system SWI executable, set `SWIPL` or pass `swipl:` to a Port session.
 
+Wrapper CI checks formatting and packaging and tests against the published
+runtime when the manifest matches. Native CI builds all five targets when
+native inputs change or when started manually for a release.
+
 ## Release
 
 1. Set the wrapper version in `mix.exs` on a release branch. Run native CI
@@ -48,3 +52,6 @@ For a system SWI executable, set `SWIPL` or pass `swipl:` to a Port session.
    elixir scripts/check_package.exs swi.tar
    elixir scripts/check_packaged_install.exs swi.tar
    ```
+
+Run **Livebook cold installs** manually in GitHub Actions to try the
+notebooks against the public package and bundles on all five targets.

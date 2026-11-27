@@ -4,7 +4,6 @@ on:
     paths:
       - 'c_src/**'
       - 'Makefile'
-      - 'mix.exs'
       - 'native/licenses/**'
       - 'scripts/build-runtime.sh'
       - 'scripts/runtime-notices.exs'
@@ -15,13 +14,15 @@ on:
     paths:
       - 'c_src/**'
       - 'Makefile'
-      - 'mix.exs'
       - 'native/licenses/**'
       - 'scripts/build-runtime.sh'
       - 'scripts/runtime-notices.exs'
       - 'scripts/runtime-metadata.exs'
       - '.github/workflows/native.yml'
   workflow_dispatch:
+concurrency:
+  group: native-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
@@ -50,15 +51,15 @@ jobs:
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          apt-get update
-          apt-get install -y ca-certificates git curl build-essential cmake ninja-build patchelf unzip libncurses6 libssl-dev
+          apt-get -o Acquire::Retries=3 update
+          apt-get -o Acquire::Retries=3 install -y ca-certificates git curl build-essential cmake ninja-build patchelf unzip libncurses6 libssl-dev
           # setup-beam reads ImageOS, which otherwise describes the host runner.
           {
             echo 'ImageOS=ubuntu20'
             echo 'LANG=C.UTF-8'
             echo 'LC_ALL=C.UTF-8'
           } >> "$GITHUB_ENV"
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           persist-credentials: false
       - name: Trust the mounted checkout
@@ -70,7 +71,10 @@ jobs:
           elixir-version: ${{ matrix.platform.elixir || '1.20' }}
       - name: macOS prerequisites
         if: runner.os == 'macOS'
-        run: brew install cmake ninja
+        run: |
+          for tool in cmake ninja; do
+            command -v "$tool" >/dev/null || brew install "$tool"
+          done
       - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e
         if: runner.os == 'Windows'
         with:
@@ -81,10 +85,11 @@ jobs:
             git curl tar make mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake
             mingw-w64-x86_64-ninja mingw-w64-x86_64-binutils
       - name: Fetch pinned upstream
-        run: git clone --branch V10.0.1 https://github.com/SWI-Prolog/swipl-devel.git "$RUNNER_TEMP/swipl-devel"
+        run: git clone --depth 1 --branch V10.0.1 https://github.com/SWI-Prolog/swipl-devel.git "$RUNNER_TEMP/swipl-devel"
       - name: Build Unix runtime
         if: runner.os != 'Windows'
         run: |
+          set -euo pipefail
           export SWI_ARTIFACT_DIR="$RUNNER_TEMP/artifacts"
           scripts/build-runtime.sh "$RUNNER_TEMP/swipl-devel" | tee "$RUNNER_TEMP/swi-build.log"
           archive=$(sed -n 's/^SWI_NATIVE_ARCHIVE=//p' "$RUNNER_TEMP/swi-build.log")
@@ -109,8 +114,9 @@ jobs:
       - name: Run the full functional suite
         if: matrix.platform.target == 'linux-x86_64'
         run: mix test
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: native-${{ matrix.platform.target }}
           path: ${{ runner.temp }}/artifacts/*
+          compression-level: 0
           if-no-files-found: error

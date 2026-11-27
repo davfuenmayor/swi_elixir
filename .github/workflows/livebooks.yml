@@ -1,0 +1,32 @@
+name: Livebook cold installs
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  livebooks:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-22.04, ubuntu-22.04-arm, windows-2022, macos-15-intel, macos-15]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: erlef/setup-beam@0f75c29430f34bb5af4cce5e3b7f6a8860fca236
+        with:
+          otp-version: '29'
+          elixir-version: '1.20'
+      - name: Run every lesson with the published Hex package
+        env:
+          MIX_INSTALL_DIR: ${{ runner.temp }}/livebook-installs
+          SWI_CACHE_DIR: ${{ runner.temp }}/livebook-swi-cache
+        run: |
+          mix local.hex --force
+          unset SWI_ELIXIR_BUNDLE SWI_RELEASE_BASE_URL
+          elixir scripts/check_livebooks.exs

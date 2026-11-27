@@ -1,0 +1,54 @@
+name: Wrapper checks
+on:
+  pull_request:
+    paths:
+      - 'lib/**'
+      - 'priv/bridge.pl'
+      - 'mix.exs'
+      - 'test/**'
+      - 'examples/**'
+      - 'native/manifest.json'
+      - 'scripts/check_*.exs'
+      - '.github/workflows/wrapper.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'lib/**'
+      - 'priv/bridge.pl'
+      - 'mix.exs'
+      - 'test/**'
+      - 'examples/**'
+      - 'native/manifest.json'
+      - 'scripts/check_*.exs'
+      - '.github/workflows/wrapper.yml'
+concurrency:
+  group: wrapper-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: erlef/setup-beam@0f75c29430f34bb5af4cce5e3b7f6a8860fca236
+        with:
+          otp-version: '27'
+          elixir-version: '1.18'
+      - run: mix format --check-formatted
+      - name: Check the source package
+        run: |
+          mix local.hex --force
+          mix hex.build -o "$RUNNER_TEMP/swi.tar"
+          elixir scripts/check_package.exs "$RUNNER_TEMP/swi.tar"
+      - name: Test with the published runtime
+        run: |
+          fingerprint=$(elixir -e 'Mix.start(); Code.require_file("mix.exs"); IO.write(Mix.Tasks.Compile.SwiNative.source_fingerprint())')
+          if [ "$fingerprint" != "$(jq -r .source_sha256 native/manifest.json)" ]; then
+            echo 'The native inputs have changed. Native SWI builds runs the tests with a fresh bundle.'
+          else
+            mix test
+          fi

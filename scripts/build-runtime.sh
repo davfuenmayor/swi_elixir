@@ -33,8 +33,20 @@ cleanup() {
 }
 trap cleanup EXIT
 fetch() {
-  [ -f "$2" ] || curl -fLsS "$1" -o "$2"
-  elixir --erl '+S 1:1' -e 'actual = :crypto.hash(:sha256, File.read!(hd(System.argv()))) |> Base.encode16(case: :lower); if actual != List.last(System.argv()), do: raise("Download checksum mismatch")' "$2" "$3"
+  local url=$1 file=$2 expected=$3 fallback=${4:-$1}
+  local source actual
+
+  for source in "$url" "$fallback" "$url"; do
+    if [ -f "$file" ] || curl -fLsS --connect-timeout 15 --max-time 120 "$source" -o "$file"; then
+      actual=$(elixir --erl '+S 1:1' -e '[file] = System.argv(); IO.write(Base.encode16(:crypto.hash(:sha256, File.read!(file)), case: :lower))' "$file")
+      [ "$actual" != "$expected" ] || return 0
+      printf 'Checksum mismatch for %s (%s)\nExpected %s\nReceived %s\n' "$file" "$source" "$expected" "$actual" >&2
+    fi
+    [ ! -f "$file" ] || rm -- "$file"
+  done
+
+  printf 'Could not download a verified copy of %s\n' "$file" >&2
+  return 1
 }
 
 if [ ! -d "$root/source" ]; then
@@ -97,7 +109,9 @@ read -r -a user_flags <<< "${CFLAGS:-}"
 # Bash 3.2 treats empty arrays as unset under nounset. Expand them conditionally.
 flags+=(${user_flags[@]+"${user_flags[@]}"})
 
-fetch https://zlib.net/fossils/zlib-1.3.2.tar.gz "$root/zlib.tar.gz" bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16
+fetch https://zlib.net/fossils/zlib-1.3.2.tar.gz "$root/zlib.tar.gz" \
+  bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16 \
+  https://github.com/madler/zlib/releases/download/v1.3.2/zlib-1.3.2.tar.gz
 mkdir -p "$root/zlib"
 tar -xzf "$root/zlib.tar.gz" -C "$root/zlib" --strip-components=1
 (
